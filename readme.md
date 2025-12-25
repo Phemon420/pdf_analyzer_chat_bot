@@ -6,22 +6,6 @@ A full-stack RAG (Retrieval-Augmented Generation) chatbot that enables users to 
 
 The application follows a decoupled client-server architecture using Server-Sent Events (SSE) for real-time communication.
 
-```mermaid
-graph TD
-    User[User Client] <-->|Next.js App| Frontend[Frontend UI]
-    Frontend -->|POST /auth/*| AuthAPI[Auth Router]
-    Frontend -->|POST /chat/pdf/stream| ChatAPI[Chat Router]
-    
-    subgraph Backend [FastAPI Server]
-        AuthAPI --> AuthController[Auth Controller]
-        ChatAPI --> ChatController[Chat Controller]
-        ChatController -->|Read/Write Session| Redis[(Redis Cache)]
-        ChatController -->|Parse PDF| PyPDF2[PyPDF2 Parser]
-        ChatController -->|Generate| Gemini[Gemini via OpenAI SDK]
-    end
-
-    ChatController -->|SSE Stream| Frontend
-```
 
 ### Streaming Protocol
 The backend uses **Server-Sent Events (SSE)** to push updates to the client in a single HTTP connection. The `/chat/pdf/stream` endpoint yields JSON chunks formatted as `data: {...}\n\n`.
@@ -39,19 +23,25 @@ Event types supported:
 
 The backend is built with **FastAPI** and uses **Redis** for session management.
 
-**Prerequisites:** Python 3.9+, Redis Server running locally.
+**Prerequisites:** Python 3.11+.
 
 1.  **Navigate to backend root** (Assumed root based on description).
+2. **Create Environment:**
+    ```bash
+    python -m venv venv
+    ```
 2.  **Install Dependencies:**
     ```bash
-    pip install fastapi uvicorn openai pypdf2 redis python-multipart pyjwt passlib[bcrypt]
+    pip install -r requirements.txt
     ```
 3.  **Environment Variables:** Create a `.env` file:
     ```env
-    GEMINI_API_KEY=your_gemini_key
-    REDIS_HOST=localhost
-    REDIS_PORT=6379
-    JWT_SECRET=your_secret_key
+    DATABASE_URL=
+    config_key_jwt = 
+    config_token_expire_sec = 
+    config_key_root = 
+    config_gemini_key =
+    config_redis_url=
     ```
 4.  **Run Server:**
     ```bash
@@ -66,11 +56,11 @@ The frontend is built with **Next.js 16+** and **Tailwind CSS**.
 1.  **Navigate to frontend directory** (`src` parent).
 2.  **Install Dependencies:**
     ```bash
-    npm install next react react-dom tailwindcss framer-motion react-pdf clsx
+    npm install
     ```
 3.  **Environment Variables:** Create `.env.local`:
     ```env
-    NEXT_PUBLIC_API_URL=http://localhost:8000
+    NEXT_PUBLIC_API_BASE_URL=
     ```
 4.  **Run Development Server:**
     ```bash
@@ -83,11 +73,6 @@ The frontend is built with **Next.js 16+** and **Tailwind CSS**.
 - **Tool Call Streaming:** Real-time feedback ("Analyzing PDF...") before the text appears.
 - **Generative UI:** Markdown rendering with support for structured data.
 - **Interactive Citations:** Clicking a citation `[1]` opens the PDF panel and scrolls to page 1.
-
-*(Placeholders for Screenshots/GIFs)*
-- *[GIF: Streaming response with "Analyzing" state]*
-- *[Screenshot: Split view showing Chat on left, PDF on right]*
-- *[Screenshot: Mobile view with collapsible sidebar]*
 
 ## Project Structure
 
