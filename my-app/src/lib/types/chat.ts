@@ -1,8 +1,17 @@
+export interface Citation {
+  id: number;
+  file_name: string;
+  page: number;
+  snippet: string;
+}
+
 export interface Message {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   createdAt: string;
+  citations?: Citation[];
+  toolType?: string; 
 }
 
 export interface ChatSession {

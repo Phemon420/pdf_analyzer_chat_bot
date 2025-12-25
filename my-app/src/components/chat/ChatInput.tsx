@@ -4,13 +4,16 @@ import { cn } from '../../lib/util';
 interface ChatInputProps {
   value: string;
   onChange: (value: string) => void;
-  onSubmit: (e: React.FormEvent) => void;
+  onSubmit: (e: React.FormEvent, file?: File) => void;
   isLoading: boolean;
   isSidebarOpen: boolean;
+  onPdfUpload: (file: File) => void;
 }
 
-export function ChatInput({ value, onChange, onSubmit, isLoading, isSidebarOpen }: ChatInputProps) {
+export function ChatInput({ value, onChange, onSubmit, isLoading, isSidebarOpen, onPdfUpload }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -23,7 +26,21 @@ export function ChatInput({ value, onChange, onSubmit, isLoading, isSidebarOpen 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      onSubmit(e);
+      handleSubmit(e);
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSubmit(e, selectedFile || undefined);
+    setSelectedFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setSelectedFile(e.target.files[0]);
+      onPdfUpload(e.target.files[0]);
     }
   };
 
@@ -35,8 +52,38 @@ export function ChatInput({ value, onChange, onSubmit, isLoading, isSidebarOpen 
       )}
     >
       <div className="max-w-3xl mx-auto">
-        <form onSubmit={onSubmit} className="relative">
+        <form onSubmit={handleSubmit} className="relative">
+          {selectedFile && (
+            <div className="absolute -top-10 left-0 bg-gray-100 dark:bg-gray-800 px-3 py-1.5 rounded-full flex items-center text-sm text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700">
+                <span className="truncate max-w-200px">{selectedFile.name}</span>
+                <button 
+                  type="button" 
+                  onClick={() => {
+                    setSelectedFile(null);
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                  }}
+                  className="ml-2 hover:text-red-500"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+          )}
           <div className="relative flex items-end w-full p-3 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-lg focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent transition-all">
+            <input 
+                type="file" 
+                ref={fileInputRef} 
+                onChange={handleFileChange} 
+                className="hidden" 
+                accept=".pdf"
+            />
+            <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="p-2 mr-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors"
+                title="Attach PDF"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+            </button>
             <textarea
               ref={textareaRef}
               value={value}

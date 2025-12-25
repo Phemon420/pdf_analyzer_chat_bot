@@ -1,6 +1,7 @@
-import { ChatSession, Message } from '../types/chat';
+import { ChatSession, Message, Citation } from '../types/chat';
+import { authService } from './authService';
 
-// Mock Data
+// // Mock Data
 const MOCK_SESSIONS: ChatSession[] = [
   { id: '1', title: 'React Hooks Explanation', updatedAt: '2023-10-27T10:00:00Z' },
   { id: '2', title: 'Next.js Routing', updatedAt: '2023-10-26T14:30:00Z' },
@@ -22,53 +23,84 @@ export async function fetchSessionMessages(sessionId: string): Promise<Message[]
     ]
 }
 
-/**
- * Simulates sending a message and receiving a stream of events (SSE).
- * In a real app, this would use fetch with EventSource or a ReadableStream.
- */
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
+
 export async function sendMessageStream(
   message: string,
+  file: File | undefined,
+  sessionId: string | undefined,
   onChunk: (chunk: string) => void,
-  onComplete: () => void,
+  onCitations: (citations: Citation[]) => void,
+  onToolType: (toolType: string) => void, // ✅ NEW
+  onDone: (sessionId: string) => void,
   onError: (error: any) => void
 ) {
   try {
-    // In a real application, you would do something like this:
-    /*
-    const response = await fetch('/api/chat', {
+    const token = authService.getToken();
+    const formData = new FormData();
+    formData.append('message', message);
+    if (file) formData.append('file', file);
+    if (sessionId) formData.append('session_id', sessionId);
+
+    const response = await fetch(`${API_BASE_URL}/chat/pdf/stream`, {
       method: 'POST',
-      body: JSON.stringify({ message }),
-      headers: { 'Content-Type': 'application/json' }
+      body: formData,
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
     });
-    
+
     if (!response.body) throw new Error('No body');
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    
+    let buffer = '';
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const text = decoder.decode(value);
-      onChunk(text);
-    }
-    onComplete();
-    */
 
-    // Simulating streaming response
-    const responseText = `Here is a simulated response to: "${message}". \n\nI am streaming this text chunk by chunk to demonstrate how Server-Sent Events (SSE) would feel in the UI. \n\n- Point 1\n- Point 2\n- Point 3`;
-    const chunks = responseText.split(/(?=[ \n])/); // Split by words/spaces roughly
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop() || '';
 
-    let i = 0;
-    const interval = setInterval(() => {
-      if (i >= chunks.length) {
-        clearInterval(interval);
-        onComplete();
-        return;
+      for (const event of events) {
+        if (!event.startsWith('data: ')) continue;
+
+        try {
+          const payload = JSON.parse(event.slice(6));
+
+          switch (payload.type) {
+            case 'ai-response':
+              onToolType(payload.type); // 👈 update tool label
+              onChunk(payload.chunk);
+              break;
+
+            case 'sources':
+              onToolType(payload.type);
+              onCitations(payload.citations);
+              break;
+
+            case 'done':
+              onToolType(payload.type);
+              onDone(payload.session_id);
+              break;
+
+            case 'error':
+              onToolType(payload.type);
+              onError(new Error(payload.message));
+              break;
+
+            default:
+              // ✅ ANY OTHER TYPE = TOOL INDICATOR
+              onToolType(payload.type);
+              break;
+          }
+        } catch (err) {
+          console.error('SSE parse error', err);
+        }
       }
-      onChunk(chunks[i]);
-      i++;
-    }, 50); // Emit a chunk every 50ms
-
+    }
   } catch (err) {
     onError(err);
   }

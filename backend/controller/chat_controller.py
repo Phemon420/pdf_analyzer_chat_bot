@@ -1,136 +1,89 @@
+from package import *
 
-# ==== MODULAR STREAMING FUNCTIONS ====
 
-# async def function_create_streaming_generator(gemini_client, messages, session_id=None, is_continuation=False):
-#     """Generic streaming generator for AI responses"""
-#     try:
-#         response = gemini_client.chat.completions.create(
-#             model="gemini-2.0-flash",
-#             messages=messages,
-#             stream=True
-#         )
+def prepare_context_and_metadata(pdf_bytes):
+    pdf_reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+    context_chunks = []
+    source_map = {}
 
-#         full_text = ""
+    for i, page in enumerate(pdf_reader.pages):
+        page_num = i + 1
+        text = page.extract_text() or ""
+        source_id = page_num 
         
-#         for chunk in response:
-#             chunk_data = {}
-            
-#             # Extract content from chunk
-#             if (hasattr(chunk, 'choices') and 
-#                 chunk.choices and 
-#                 hasattr(chunk.choices[0], 'delta') and 
-#                 hasattr(chunk.choices[0].delta, 'content') and 
-#                 chunk.choices[0].delta.content):
-                
-#                 content = chunk.choices[0].delta.content
-#                 full_text += content
-#                 chunk_data['chunk'] = content
-#                 chunk_data['full_text'] = full_text
-                
-#                 if session_id:
-#                     chunk_data['session_id'] = session_id
-#                 if is_continuation:
-#                     chunk_data['is_continuation'] = True
+        context_chunks.append(f"--- SOURCE ID: {source_id}, PAGE: {page_num} ---\n{text}\n")
+        # Store metadata for citation mapping
+        source_map[str(source_id)] = {
+            "id": source_id,
+            "page": page_num,
+            "snippet": text[:150] + "..."
+        }
+        
+    return "".join(context_chunks), source_map
 
-#                 print(content)
-            
-#             if chunk_data:
-#                 yield f"data: {json.dumps(chunk_data)}\n\n"
+async def dynamic_pdf_stream_with_redis(
+    gemini_client, 
+    messages, 
+    session_id, 
+    redis_client, 
+    source_map, 
+    pdf_filename
+):
+    try:
+        print("i am here")
+        full_text = ""
+        # 1. UI Initial Step
+        yield f"data: {json.dumps({'type': 'analysing-pdf', 'message': 'Checking document and history...'})}\n\n"
 
-#         # Yield final result for session management
-#         yield (full_text, messages)
+        # 2. Start Gemini Stream
+        print(messages)
+        response = gemini_client.chat.completions.create(
+            model="gemini-2.5-flash",
+            messages=messages,
+            stream=True
+        )
 
-#     except Exception as e:
-#         yield f"data: {json.dumps({'error': str(e), 'is_continuation': is_continuation})}\n\n"
-#         yield ("", [])
+        # for chunk in response:
+        #     if hasattr(chunk.choices[0], 'delta') and chunk.choices[0].delta.content:
+        #         content = chunk.choices[0].delta.content
+        #         full_text += content
+        #         yield f"data: {json.dumps({'type': 'text', 'chunk': content})}\n\n"
 
-# async def function_manage_email_session_start(messages, full_text, **kwargs):
-#     """Create and store new email conversation session"""
-#     session_id = str(uuid.uuid4())
-    
-#     email_chat_sessions[session_id] = {
-#         'messages': messages + [{"role": "assistant", "content": full_text}],
-#         'created_at': time.time()
-#     }
-    
-#     return session_id
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                full_text += content
 
-# async def function_manage_email_session_continue(messages, full_text, **kwargs):
-#     """Update existing email conversation session"""
-#     session_id = kwargs.get('session_id')
-#     session_data = email_chat_sessions.get(session_id)
-    
-#     if session_data is None:
-#         raise ValueError("Invalid session_id")
-    
-#     final_messages = messages + [{"role": "assistant", "content": full_text}]
-#     email_chat_sessions[session_id] = {
-#         'messages': final_messages,
-#         'created_at': session_data['created_at'],
-#         'updated_at': time.time()
-#     }
-    
-#     return session_id
+                yield f"data: {json.dumps({'type': 'ai-response', 'chunk': content})}\n\n"
+                await asyncio.sleep(0)  # ← critical
 
-# async def function_get_email_session(session_id):
-#     """Retrieve email conversation session"""
-#     return email_chat_sessions.get(session_id)
+        # 3. DYNAMIC CITATION MAPPING (The logic you wanted back)
+        found_ids = list(set(re.findall(r'\[(\d+)\]', full_text)))
+        dynamic_citations = []
+        for sid in found_ids:
+            if sid in source_map: # Check against the map we passed in
+                meta = source_map[sid]
+                dynamic_citations.append({
+                    "id": int(sid),
+                    "file_name": pdf_filename,
+                    "page": meta["page"],
+                    "snippet": meta["snippet"]
+                })
 
-# async def function_build_email_messages(system_prompt, user_prompt):
-#     """Build initial messages for email conversation"""
-#     return [
-#         {"role": "system", "content": system_prompt},
-#         {"role": "user", "content": user_prompt}
-#     ]
+        if dynamic_citations:
+            yield f"data: {json.dumps({'type': 'sources', 'citations': dynamic_citations})}\n\n"
 
-# async def function_create_generic_stream_response(gemini_client, messages, session_management_func=None, **kwargs):
-#     """Generic function to create streaming response with optional session management"""
-    
-#     async def generate():
-#         try:
-#             # Generate session ID if needed
-#             session_id = kwargs.get('session_id', str(uuid.uuid4()) if session_management_func else None)
-            
-#             # Use modular streaming generator
-#             generator = function_create_streaming_generator(
-#                 gemini_client, 
-#                 messages, 
-#                 session_id=session_id, 
-#                 is_continuation=kwargs.get('is_continuation', False)
-#             )
-            
-#             full_text = ""
-#             final_messages = []
-            
-#             # Stream the response
-#             async for item in generator:
-#                 if isinstance(item, tuple):  # Final result (full_text, messages)
-#                     full_text, final_messages = item
-#                     break
-#                 else:  # Streaming data
-#                     yield item
-            
-#             # Handle session management if provided
-#             completion_data = {'completed': True, 'full_text': full_text}
-            
-#             if session_management_func:
-#                 session_result = await session_management_func(final_messages, full_text, **kwargs)
-#                 if isinstance(session_result, str):  # session_id returned
-#                     completion_data['session_id'] = session_result
-#                 elif isinstance(session_result, dict):  # additional data returned
-#                     completion_data.update(session_result)
-            
-#             # Add any additional completion data
-#             completion_data.update(kwargs.get('completion_data', {}))
-            
-#             # Send final completion message
-#             yield f"data: {json.dumps(completion_data)}\n\n"
+        # 4. SAVE TO REDIS (History + Metadata)
+        # We store the updated message list AND the source_map so follow-ups work
+        messages.append({"role": "assistant", "content": full_text})
+        session_data = {
+            "messages": messages[-20:], # Keep last 20 messages for context
+            "source_map": source_map,
+            "pdf_filename": pdf_filename
+        }
+        await redis_client.setex(f"chat:{session_id}", 86400, json.dumps(session_data))
 
-#         except Exception as e:
-#             error_data = {'error': str(e)}
-#             if kwargs.get('is_continuation'):
-#                 error_data['is_continuation'] = True
-#             yield f"data: {json.dumps(error_data)}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
 
-#     return StreamingResponse(generate(), media_type="text/event-stream")
-
+    except Exception as e:
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"

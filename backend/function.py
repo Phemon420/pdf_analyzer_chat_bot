@@ -109,5 +109,9 @@ def normalize_single_record(result, *, context: str = ""):
 
     return result
 
-
-email_chat_sessions = {}
+from io import BytesIO
+import redis.asyncio as redis
+def function_client_read_redis(config_redis_url):
+    pool = redis.ConnectionPool.from_url(config_redis_url, decode_responses=True)
+    client_redis = redis.Redis(connection_pool=pool)
+    return client_redis

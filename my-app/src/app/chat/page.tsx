@@ -6,6 +6,9 @@ import { MessageBubble } from '../../components/chat/MessageBubble';
 import { ChatInput } from '../../components/chat/ChatInput';
 import { ChatSession, Message } from '../../lib/types/chat';
 import { fetchChatHistory, fetchSessionMessages, sendMessageStream } from '../../lib/api/chatService';
+import PDFViewer from '../../components/pdf/pdfviewer';
+import { savePdfToSession, loadPdfFromSession } from '../../lib/pdfSession';
+
 
 export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -15,8 +18,11 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [activePdfUrl, setActivePdfUrl] = useState<string>();
+  const [activePage, setActivePage] = useState<number>();
+  const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
 
-  const selectSession = async (id: string) => {
+    const selectSession = async (id: string) => {
     // Close sidebar on mobile when a session is selected
     if (window.innerWidth < 1024) {
       setIsSidebarOpen(false);
@@ -35,6 +41,21 @@ export default function ChatPage() {
     setMessages(msgs);
   };
 
+  useEffect(() => {
+    const pdf = loadPdfFromSession();
+    if (pdf) setActivePdfUrl(pdf);
+  }, []);
+
+  // Example: simulate PDF upload
+  const handlePdfUpload = (file: File) => {
+    savePdfToSession(file);
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setActivePdfUrl(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
 
   // Initial Data Fetch
   useEffect(() => {
@@ -56,15 +77,20 @@ export default function ChatPage() {
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
-
+  
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
+  const handleCitationClick = (page: number) => {
+    setActivePage(page);
+    console.log(`Citation clicked: Go to page ${page}`);
+    setIsPdfModalOpen(true);
+  };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent, file?: File) => {
     e.preventDefault();
-    if (!inputValue.trim() || isLoading) return;
+    if ((!inputValue.trim() && !file) || isLoading) return;
 
     const userMessageContent = inputValue.trim();
     setInputValue('');
@@ -74,7 +100,7 @@ export default function ChatPage() {
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: userMessageContent,
+      content: userMessageContent + (file ? ` [Attached: ${file.name}]` : ''),
       createdAt: new Date().toISOString(),
     };
 
@@ -86,41 +112,67 @@ export default function ChatPage() {
         id: assistantMessageId,
         role: 'assistant',
         content: '',
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        citations: []
     };
     
     setMessages((prev) => [...prev, assistantMessage]);
 
-    // Stream the response
     await sendMessageStream(
       userMessageContent,
+      file,
+      currentSessionId,
+
+      // ai-response
       (chunk) => {
-        setMessages((prev) => {
-            const newMessages = [...prev];
-            const lastIndex = newMessages.length - 1;
-            const lastMsg = newMessages[lastIndex];
-            
-            if (lastMsg.id === assistantMessageId) {
-                // Correctly creating a new object for immutability
-                newMessages[lastIndex] = {
-                    ...lastMsg,
-                    content: lastMsg.content + chunk
-                };
-            }
-            return newMessages;
-        });
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, content: m.content + chunk }
+              : m
+          )
+        );
       },
-      () => {
+
+      // sources
+      (citations) => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, citations }
+              : m
+          )
+        );
+      },
+
+      // ✅ TOOL TYPE
+      (toolType) => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, toolType }
+              : m
+          )
+        );
+      },
+
+      // done
+      (sessionId) => {
         setIsLoading(false);
-        // Maybe refresh history if it was a new chat
+        setCurrentSessionId(sessionId);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, toolType: undefined }
+              : m
+          )
+        );
       },
+
+      // error
       (error) => {
-        console.error('Error sending message:', error);
+        console.error(error);
         setIsLoading(false);
-        setMessages((prev) => [
-            ...prev,
-            { id: Date.now().toString(), role: 'assistant', content: 'Sorry, an error occurred.', createdAt: new Date().toISOString() }
-        ])
       }
     );
   };
@@ -147,7 +199,7 @@ export default function ChatPage() {
             ) : (
                 <div className="flex-1">
                     {messages.map((msg) => (
-                        <MessageBubble key={msg.id} message={msg} />
+                        <MessageBubble key={msg.id} message={msg} onCitationClick={handleCitationClick}/>
                     ))}
                     <div ref={messagesEndRef} />
                 </div>
@@ -155,12 +207,23 @@ export default function ChatPage() {
         </div>
       </div>
       
+      {/* PDF OVERLAY MODE */}
+      {isPdfModalOpen && activePdfUrl && (
+        <PDFViewer 
+          fileUrl={activePdfUrl} 
+          activePage={activePage} 
+          isOpen={isPdfModalOpen}
+          onClose={() => setIsPdfModalOpen(false)} 
+        />
+      )}
+
       <ChatInput
         value={inputValue}
         onChange={setInputValue}
         onSubmit={handleSubmit}
         isLoading={isLoading}
         isSidebarOpen={isSidebarOpen}
+        onPdfUpload={handlePdfUpload}
       />
     </ChatLayout>
   );

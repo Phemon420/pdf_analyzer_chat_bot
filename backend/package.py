@@ -22,5 +22,13 @@ import uuid
 import time
 import urllib.parse
 
+import PyPDF2
+
+from io import BytesIO
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
+
+import re
+
 # Create router instance
 router = APIRouter()
