@@ -8,10 +8,10 @@ config_cors_origin_list=["*"]
 config_postgres_url=os.environ.get("DATABASE_URL")
 config_token_user_key_list = "id,username".split(",")
 config_key_root = os.environ.get("config_key_root")
-config_gemini_key = os.environ.get("config_gemini_key")
+# config_gemini_key = os.environ.get("config_gemini_key")
+config_openai_key = os.environ.get("OPENAI_API_KEY")
 config_key_jwt = os.environ.get("config_key_jwt")
 config_token_expire_sec = int(os.environ.get("config_token_expire_sec",259200))
-config_redis_url = os.environ.get("config_redis_url")
 
 from contextlib import asynccontextmanager
 import traceback
@@ -19,14 +19,16 @@ import traceback
 async def lifespan(app:FastAPI):
     try:
         client_postgres=await function_client_read_postgres(config_postgres_url) if config_postgres_url else None
-        client_gemini = function_client_read_gemini(config_gemini_key) if config_gemini_key else None
-        client_redis=await function_client_read_redis(config_redis_url) if config_redis_url else None
+        # client_gemini = function_client_read_gemini(config_gemini_key) if config_gemini_key else None
+        client_openai = function_client_read_openai(config_openai_key) if config_openai_key else None
+        
         app.state.client_postgres = client_postgres
-        app.state.client_gemini = client_gemini
+        # app.state.client_gemini = client_gemini
+        app.state.client_openai = client_openai
         app.state.config_key_root = config_key_root
         app.state.config_key_jwt = config_key_jwt
         app.state.config_token_expire_sec = config_token_expire_sec
-        app.state.redis_client = client_redis
+        
         print("Database connection established successfully!")
         function_add_app_state({**globals(),**locals()}, app, ("config_","client_","cache_"))
         yield
@@ -34,13 +36,10 @@ async def lifespan(app:FastAPI):
         print(f"Failed to establish database connection: {str(e)}")
         print(traceback.format_exc())
     finally:
-        if hasattr(app.state, 'client_postgres_asyncpg') and app.state.client_postgres:
+        if hasattr(app.state, 'client_postgres') and app.state.client_postgres:
             await app.state.client_postgres.close()
-            await app.state.client_redis.aclose()
             print("Database connection closed.")
 
-
-app = FastAPI()
 
 #app
 app=function_fastapi_app_read(True,lifespan)
@@ -67,7 +66,8 @@ def function_return_error(message):
 
 PUBLIC_PATHS = {
     "/auth/signup",
-    "/auth/login"
+    "/auth/login",
+    "/api/drive/view"
 }
 
 #middleware

@@ -62,22 +62,31 @@ async def function_token_decode(token,config_key_jwt):
     return user
 
 async def function_token_check(request,config_key_root,config_key_jwt):
-    user={}
+    user=None
     api=request.url.path
     token=request.headers.get("Authorization").split("Bearer ",1)[1] if request.headers.get("Authorization") and request.headers.get("Authorization").startswith("Bearer ") else None
     if api.startswith("/root"):
         if token!=config_key_root:raise Exception("token root mismatch")
     else:
-        if token:user=await function_token_decode(token,config_key_jwt)
+        if token:
+            try:
+                user=await function_token_decode(token,config_key_jwt)
+            except:
+                user=None
         if api.startswith("/my") and not token:raise Exception("token missing")
         elif api.startswith("/private") and not token:raise Exception("token missing")
         elif api.startswith("/admin") and not token:raise Exception("token missing")
     return user
 
-from openai import OpenAI
-def function_client_read_gemini(config_gemini_key):
-    client_gemini=OpenAI(api_key=config_gemini_key,base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
-    return client_gemini
+from openai import AsyncOpenAI
+def function_client_read_openai(config_openai_key):
+    client_openai = AsyncOpenAI(api_key=config_openai_key)
+    return client_openai
+
+# import google.generativeai as genai
+# def function_client_read_gemini(config_gemini_key):
+#     genai.configure(api_key=config_gemini_key)
+#     return genai.GenerativeModel('gemini-pro')
 
 
 #client
@@ -111,7 +120,7 @@ def normalize_single_record(result, *, context: str = ""):
 
 from io import BytesIO
 import redis.asyncio as redis
-def function_client_read_redis(config_redis_url):
+async def function_client_read_redis(config_redis_url):
     pool = redis.ConnectionPool.from_url(config_redis_url, decode_responses=True)
     client_redis = redis.Redis(connection_pool=pool)
     return client_redis

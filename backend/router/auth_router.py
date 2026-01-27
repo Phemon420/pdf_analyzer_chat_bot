@@ -1,13 +1,13 @@
+from package import *
 from controller.auth_controller import *
 from schema.auth_model import *
-from package import *
-from main import *
+from fastapi import Request
 
-@app.get("/")
+@router.get("/")
 async def function_api_root():
    return {"status":1,"message":"API is working!"}
 
-@app.post("/auth/signup")
+@router.post("/auth/signup")
 async def function_api_auth_signup(request:Request,signup:Signup):
    user=await function_auth_signup_username_password(request.app.state.client_postgres,signup.username,signup.password)
    print("checkpoint1")
@@ -20,7 +20,7 @@ async def function_api_auth_signup(request:Request,signup:Signup):
    print("checkpoint2")
    return {"status":1,"Token":token}
 
-@app.post("/auth/login")
+@router.post("/auth/login")
 async def function_api_auth_login_password(request:Request,login:Login):
    user=await function_auth_login_username_password(request.app.state.client_postgres,login.username,login.password)
    token = await function_token_encode(

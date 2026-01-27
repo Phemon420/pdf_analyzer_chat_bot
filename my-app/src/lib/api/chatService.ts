@@ -1,29 +1,28 @@
 import { ChatSession, Message, Citation } from '../types/chat';
 import { authService } from './authService';
 
-// // Mock Data
-const MOCK_SESSIONS: ChatSession[] = [
-  { id: '1', title: 'React Hooks Explanation', updatedAt: '2023-10-27T10:00:00Z' },
-  { id: '2', title: 'Next.js Routing', updatedAt: '2023-10-26T14:30:00Z' },
-  { id: '3', title: 'Tailwind CSS Tips', updatedAt: '2023-10-25T09:15:00Z' },
-];
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
 export async function fetchChatHistory(): Promise<ChatSession[]> {
-  // Simulate network delay
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  return MOCK_SESSIONS;
+  const token = authService.getToken();
+  // const response = await fetch(`${API_BASE_URL}/chat/history`, {
+  //   headers: { Authorization: `Bearer ${token}` }
+  // });
+  var response:any;
+  if (!response) return [];
+  const data = await response.json();
+  return data.sessions || [];
 }
 
 export async function fetchSessionMessages(sessionId: string): Promise<Message[]> {
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    // Return some dummy messages for the session
-    return [
-        { id: 'm1', role: 'user', content: 'Tell me about React Hooks.', createdAt: '2023-10-27T10:00:00Z' },
-        { id: 'm2', role: 'assistant', content: 'React Hooks are functions that let you hook into React state and lifecycle features from function components.', createdAt: '2023-10-27T10:00:05Z' }
-    ]
+  const token = authService.getToken();
+  const response = await fetch(`${API_BASE_URL}/chat/history/${sessionId}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!response.ok) return [];
+  const data = await response.json();
+  return data.messages || [];
 }
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
 export async function sendMessageStream(
   message: string,

@@ -1,0 +1,121 @@
+[
+  {
+    "tool_id": "check_calendar_availability",
+    "tool_description": "Check Google Calendar availability for the next X days. Returns busy slots.",
+    "must_required_params": ["days"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this when the user asks for free time or availability."
+  },
+  {
+    "tool_id": "schedule_calendar_event",
+    "tool_description": "Schedule a new event on Google Calendar.",
+    "must_required_params": ["start_time", "end_time", "title"],
+    "optional_params": ["attendee_email", "description"],
+    "exact_precise_tool_use": "Use this to create a new appointment or event."
+  },
+  {
+    "tool_id": "update_calendar_event",
+    "tool_description": "Update an existing Google Calendar event.",
+    "must_required_params": ["event_id"],
+    "optional_params": ["title", "start_time", "end_time", "description"],
+    "exact_precise_tool_use": "Use this to modify an existing calendar event."
+  },
+  {
+    "tool_id": "delete_calendar_event",
+    "tool_description": "Delete an event from Google Calendar.",
+    "must_required_params": ["event_id"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to remove a scheduled event."
+  },
+  {
+    "tool_id": "send_email",
+    "tool_description": "Send an email via Gmail.",
+    "must_required_params": ["to_email", "subject", "body"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to send a message to one or more people via email. Supports a single email string or a list of emails."
+  },
+  {
+    "tool_id": "read_emails",
+    "tool_description": "List recent emails from Gmail inbox with snippets.",
+    "must_required_params": [],
+    "optional_params": ["query", "max_results"],
+    "exact_precise_tool_use": "Use this to check the inbox or find specific emails."
+  },
+  {
+    "tool_id": "delete_email",
+    "tool_description": "Move a Gmail message to the trash.",
+    "must_required_params": ["message_id"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to delete an unwanted email."
+  },
+  {
+    "tool_id": "update_email_labels",
+    "tool_description": "Add or remove labels from a Gmail message.",
+    "must_required_params": ["message_id"],
+    "optional_params": ["add_labels", "remove_labels"],
+    "exact_precise_tool_use": "Use this to organize emails into folders/labels."
+  },
+  {
+    "tool_id": "list_drive_files",
+    "tool_description": "List files from Google Drive. Highly recommended to use 'filename' or 'mime_type' for precise searching.",
+    "must_required_params": [],
+    "optional_params": ["page_size", "query", "filename", "mime_type"],
+    "exact_precise_tool_use": "Use this to see files or search for a document. Prefer 'filename' for exact matches."
+  },
+  {
+    "tool_id": "upload_to_drive",
+    "tool_description": "Upload content to a new text file on Google Drive.",
+    "must_required_params": ["filename", "content"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to save text data or create a new file."
+  },
+  {
+    "tool_id": "update_drive_file",
+    "tool_description": "Update the name of an existing Google Drive file.",
+    "must_required_params": ["file_id", "filename"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to rename a file."
+  },
+  {
+    "tool_id": "delete_drive_file",
+    "tool_description": "Permanently delete a file from Google Drive.",
+    "must_required_params": ["file_id"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to remove a file from Drive."
+  },
+  {
+    "tool_id": "read_drive_file_content",
+    "tool_description": "Read the content of a Google Drive file. Supports Google Docs (exports to text) and text files.",
+    "must_required_params": ["file_id"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to read the text inside a document or file."
+  },
+  {
+    "tool_id": "create_spreadsheet",
+    "tool_description": "Create a new Google Sheets spreadsheet.",
+    "must_required_params": ["title"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to start a new spreadsheet."
+  },
+  {
+    "tool_id": "read_spreadsheet",
+    "tool_description": "Read values from a Google Sheets range.",
+    "must_required_params": ["spreadsheet_id"],
+    "optional_params": ["range"],
+    "exact_precise_tool_use": "Use this to fetch data from a sheet. Leave 'range' empty to automatically read the first sheet unless a specific tab name is known."
+  },
+  {
+    "tool_id": "update_spreadsheet_values",
+    "tool_description": "Overwrite a range of values in Google Sheets.",
+    "must_required_params": ["spreadsheet_id", "range", "values"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to update or edit spreadsheet data."
+  },
+  {
+    "tool_id": "clear_spreadsheet_values",
+    "tool_description": "Clear all values in a specified Google Sheets range.",
+    "must_required_params": ["spreadsheet_id", "range"],
+    "optional_params": [],
+    "exact_precise_tool_use": "Use this to wipe data from a section of a sheet."
+  }
+]

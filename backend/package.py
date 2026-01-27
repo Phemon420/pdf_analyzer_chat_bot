@@ -9,6 +9,8 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 import json
 from dotenv import load_dotenv
 import httpx
+from models import SessionLocal, ChatMessage
+from sqlalchemy import func, text
 
 
 from pydantic import BaseModel
@@ -25,7 +27,7 @@ import urllib.parse
 import PyPDF2
 
 from io import BytesIO
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 import re

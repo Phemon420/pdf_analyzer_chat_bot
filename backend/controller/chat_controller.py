@@ -21,47 +21,42 @@ def prepare_context_and_metadata(pdf_bytes):
         
     return "".join(context_chunks), source_map
 
-async def dynamic_pdf_stream_with_redis(
+async def dynamic_pdf_stream_db(
     gemini_client, 
     messages, 
     session_id, 
-    redis_client, 
+    user_id, 
     source_map, 
     pdf_filename
 ):
+    db = SessionLocal()
     try:
-        print("i am here")
         full_text = ""
         # 1. UI Initial Step
         yield f"data: {json.dumps({'type': 'analysing-pdf', 'message': 'Checking document and history...'})}\n\n"
 
         # 2. Start Gemini Stream
-        print(messages)
+        print(f"[LOGGER] PDF CHAT ({session_id}) REQUEST: {messages[-1]['content']}")
         response = gemini_client.chat.completions.create(
             model="gemini-2.5-flash",
             messages=messages,
             stream=True
         )
 
-        # for chunk in response:
-        #     if hasattr(chunk.choices[0], 'delta') and chunk.choices[0].delta.content:
-        #         content = chunk.choices[0].delta.content
-        #         full_text += content
-        #         yield f"data: {json.dumps({'type': 'text', 'chunk': content})}\n\n"
-
         for chunk in response:
             if chunk.choices[0].delta.content:
                 content = chunk.choices[0].delta.content
                 full_text += content
-
                 yield f"data: {json.dumps({'type': 'ai-response', 'chunk': content})}\n\n"
-                await asyncio.sleep(0)  # ← critical
+                await asyncio.sleep(0)
 
-        # 3. DYNAMIC CITATION MAPPING (The logic you wanted back)
+        print(f"[LOGGER] PDF CHAT ({session_id}) RESPONSE: {full_text[:200]}...")
+
+        # 3. DYNAMIC CITATION MAPPING
         found_ids = list(set(re.findall(r'\[(\d+)\]', full_text)))
         dynamic_citations = []
         for sid in found_ids:
-            if sid in source_map: # Check against the map we passed in
+            if sid in source_map:
                 meta = source_map[sid]
                 dynamic_citations.append({
                     "id": int(sid),
@@ -73,17 +68,21 @@ async def dynamic_pdf_stream_with_redis(
         if dynamic_citations:
             yield f"data: {json.dumps({'type': 'sources', 'citations': dynamic_citations})}\n\n"
 
-        # 4. SAVE TO REDIS (History + Metadata)
-        # We store the updated message list AND the source_map so follow-ups work
-        messages.append({"role": "assistant", "content": full_text})
-        session_data = {
-            "messages": messages[-20:], # Keep last 20 messages for context
-            "source_map": source_map,
-            "pdf_filename": pdf_filename
-        }
-        await redis_client.setex(f"chat:{session_id}", 86400, json.dumps(session_data))
+        # 4. SAVE TO DB
+        assistant_msg = ChatMessage(
+            session_id=session_id,
+            user_id=user_id,
+            role="assistant",
+            content=full_text,
+            citations=dynamic_citations if dynamic_citations else None
+        )
+        db.add(assistant_msg)
+        db.commit()
 
         yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
 
     except Exception as e:
+        print(f"[ERROR] PDF Stream Error: {e}")
         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    finally:
+        db.close()

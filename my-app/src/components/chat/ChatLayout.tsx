@@ -1,6 +1,7 @@
 import React from 'react';
 import { Sidebar } from './Sidebar';
 import { ThemeToggle } from './ThemeToggle';
+import { GoogleAuthButton } from '../auth/GoogleAuthButton';
 import { ChatSession } from '../../lib/types/chat';
 import { cn } from '../../lib/util';
 
@@ -16,7 +17,7 @@ interface ChatLayoutProps {
 export function ChatLayout({ children, sessions, currentSessionId, onSelectSession, isSidebarOpen, setIsSidebarOpen }: ChatLayoutProps) {
   return (
     <div className="flex h-screen bg-white dark:bg-black overflow-hidden">
-      <Sidebar 
+      <Sidebar
         sessions={sessions}
         currentSessionId={currentSessionId}
         onSelectSession={onSelectSession}
@@ -24,7 +25,7 @@ export function ChatLayout({ children, sessions, currentSessionId, onSelectSessi
         onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
       />
 
-      <main 
+      <main
         className={cn(
           "flex-1 flex flex-col relative w-full transition-all duration-200 ease-in-out",
           isSidebarOpen ? "lg:ml-64" : "lg:ml-0"
@@ -33,8 +34,8 @@ export function ChatLayout({ children, sessions, currentSessionId, onSelectSessi
         {/* Header (Mobile & Desktop) */}
         <div className="sticky top-0 z-10 flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-black">
           <div className="flex items-center">
-            <button 
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
+            <button
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
               className="p-2 -ml-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md"
               aria-label="Toggle Sidebar"
             >
@@ -42,14 +43,17 @@ export function ChatLayout({ children, sessions, currentSessionId, onSelectSessi
             </button>
             <span className="ml-2 font-semibold text-gray-900 dark:text-gray-100">ChatBot</span>
           </div>
-          
-          <ThemeToggle />
+
+          <div className="flex items-center gap-3">
+            <GoogleAuthButton />
+            <ThemeToggle />
+          </div>
         </div>
 
         <div className="flex-1 overflow-hidden relative">
-            {children}
+          {children}
         </div>
-      </main>
-    </div>
+      </main >
+    </div >
   );
 }
