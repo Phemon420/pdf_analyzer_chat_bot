@@ -1,4 +1,5 @@
 import { Message } from '../types/chat';
+import { authService } from './authService';
 
 type WorkflowEvent =
     | { type: 'content'; chunk?: string; content?: string; role?: string; finished?: boolean }
@@ -94,7 +95,11 @@ export class WorkflowService {
         }
 
         this.setConnectionState('connecting');
-        this.ws = new WebSocket(this.baseUrl);
+        
+        const token = authService.getToken();
+        const wsUrl = token ? `${this.baseUrl}?token=${token}` : this.baseUrl;
+        
+        this.ws = new WebSocket(wsUrl);
 
         // Set connection timeout
         this.connectionTimeout = setTimeout(() => {

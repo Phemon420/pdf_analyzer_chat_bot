@@ -4,6 +4,10 @@ import time
 import asyncio
 import traceback
 from typing import Optional, Dict, Any, List
+import time
+import asyncio
+import traceback
+from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from models import SessionLocal, ChatMessage
 from services import google_services
@@ -41,6 +45,33 @@ def load_tools_registry() -> List[Dict[str, Any]]:
     return []
 
 TOOLS_REGISTRY = load_tools_registry()
+
+def get_openai_tools_from_registry() -> List[Dict[str, Any]]:
+    # Replaced by async get_mcp_openai_tools function
+    pass
+
+async def get_mcp_openai_tools(mcp_client) -> List[Dict[str, Any]]:
+    tools = []
+    try:
+        mcp_tools = await mcp_client.list_tools()
+        for t in getattr(mcp_tools, "tools", []):
+            schema = dict(t.inputSchema) if hasattr(t, "inputSchema") else {}
+            if "properties" in schema and "user_id" in schema["properties"]:
+                del schema["properties"]["user_id"]
+            if "required" in schema and "user_id" in schema["required"]:
+                schema["required"] = [r for r in schema["required"] if r != "user_id"]
+                
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": getattr(t, "name", ""),
+                    "description": getattr(t, "description", ""),
+                    "parameters": schema
+                }
+            })
+    except Exception as e:
+        print(f"Error fetching MCP tools: {e}")
+    return tools
 
 # Local memory cache for workflow state
 local_workflow_cache = {}
@@ -237,6 +268,7 @@ async def extract_variables(client_openai, user_message: str) -> Dict[str, Any]:
                   {"role": "user", "content": prompt}],
         response_format={"type": "json_object"}
     )
+    print(f"[LOGGER] AI RESPONSE (extract_variables): {response.choices[0].message.content}")
     extracted = json.loads(response.choices[0].message.content)
     # Remove null values
     return {k: v for k, v in extracted.items() if v is not None and v != ""}
@@ -292,11 +324,11 @@ async def plan_workflow(client_openai, user_message: str, tools_registry: List[D
         ],
         response_format={"type": "json_object"}
     )
+    print(f"[LOGGER] AI RESPONSE (plan_workflow): {response.choices[0].message.content}")
     plan_data = json.loads(response.choices[0].message.content)
     return plan_data.get("plan", plan_data.get("calls", []))
 
-async def verify_step_result(client_openai, tool_name: str, tool_args: Dict, tool_result: Dict, 
-                              user_goal: str, remaining_plan: List[Dict], execution_context: Dict) -> Dict[str, Any]:
+async def verify_step_result(client_openai, tool_name: str, tool_args: Dict, tool_result: Dict, user_goal: str, remaining_plan: List[Dict], execution_context: Dict) -> Dict[str, Any]:
     """LLM verification of tool execution result with context for next step."""
     prompt = f"""
     Verify the result of tool execution and provide context for next steps.
@@ -328,6 +360,7 @@ async def verify_step_result(client_openai, tool_name: str, tool_args: Dict, too
             ],
             response_format={"type": "json_object"}
         )
+        print(f"[LOGGER] AI RESPONSE (verify_step_result): {response.choices[0].message.content}")
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         print(f"[VERIFICATION ERROR] {e}")
@@ -403,13 +436,13 @@ async def find_similar_files(client_openai, search_query: str, available_files: 
             ],
             response_format={"type": "json_object"}
         )
+        print(f"[LOGGER] AI RESPONSE (find_similar_files): {response.choices[0].message.content}")
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         print(f"[SIMILARITY SEARCH ERROR] {e}")
         return {"matches": [], "message": f"Search failed: {str(e)}"}
 
-async def resolve_step_parameters(client_openai, tool_name: str, user_goal: str, history: List[Dict], 
-                                 context: Dict, step_def: Dict, tools_registry: List[Dict]) -> Dict[str, Any]:
+async def resolve_step_parameters(client_openai, tool_name: str, user_goal: str, history: List[Dict], context: Dict, step_def: Dict, tools_registry: List[Dict]) -> Dict[str, Any]:
     """
     Use LLM to resolve the most accurate parameters for the NEXT tool call
     based on the entire execution history and context.
@@ -454,6 +487,7 @@ async def resolve_step_parameters(client_openai, tool_name: str, user_goal: str,
             ],
             response_format={"type": "json_object"}
         )
+        print(f"[LOGGER] AI RESPONSE (resolve_step_parameters): {response.choices[0].message.content}")
         result = json.loads(response.choices[0].message.content)
         return result
     except Exception as e:
@@ -473,29 +507,27 @@ def get_hitl_selection_schema(title: str, message: str, options: List[Dict], con
         "none_label": "None of these files"
     }
 
-async def execute_google_tool(db: Session, user_id: int, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute tools using google_services"""
+async def execute_google_tool(mcp_client, tool_name: str, arguments: Dict[str, Any], user_id: int) -> Dict[str, Any]:
+    """Execute tools using FastMCP Client"""
+    arguments["user_id"] = user_id
+    print(f"[LOGGER] EXECUTING MCP TOOL: {tool_name} with args: {arguments}")
     try:
-        if tool_name == "check_calendar_availability": return await google_services.check_calendar_availability(db, user_id, arguments)
-        elif tool_name == "schedule_calendar_event": return await google_services.schedule_calendar_event(db, user_id, arguments)
-        elif tool_name == "update_calendar_event": return await google_services.update_calendar_event(db, user_id, arguments)
-        elif tool_name == "delete_calendar_event": return await google_services.delete_calendar_event(db, user_id, arguments)
-        elif tool_name == "send_email": return await google_services.send_email(db, user_id, arguments)
-        elif tool_name == "read_emails": return await google_services.read_emails(db, user_id, arguments)
-        elif tool_name == "delete_email": return await google_services.delete_email(db, user_id, arguments)
-        elif tool_name == "update_email_labels": return await google_services.update_email_labels(db, user_id, arguments)
-        elif tool_name == "list_drive_files": return await google_services.list_drive_files(db, user_id, arguments)
-        elif tool_name == "upload_to_drive": return await google_services.upload_to_drive(db, user_id, arguments)
-        elif tool_name == "update_drive_file": return await google_services.update_drive_file(db, user_id, arguments)
-        elif tool_name == "delete_drive_file": return await google_services.delete_drive_file(db, user_id, arguments)
-        elif tool_name == "read_drive_file_content": return await google_services.read_drive_file_content(db, user_id, arguments)
-        elif tool_name == "create_spreadsheet": return await google_services.create_spreadsheet(db, user_id, arguments)
-        elif tool_name == "read_spreadsheet": return await google_services.read_spreadsheet(db, user_id, arguments)
-        elif tool_name == "update_spreadsheet_values": return await google_services.update_spreadsheet_values(db, user_id, arguments)
-        elif tool_name == "clear_spreadsheet_values": return await google_services.clear_spreadsheet_values(db, user_id, arguments)
+        result = await mcp_client.call_tool(tool_name, arguments=arguments)
+        print(f"[LOGGER] RAW MCP TOOL RESULT: {result}")
+        if result.content and len(result.content) > 0:
+            text = result.content[0].text
+            if getattr(result, "isError", False):
+                return {"status": "error", "message": text}
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {"status": "error", "message": text}
+        return {"status": "success", "message": "Tool executed with empty response"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
-    return {"status": "error", "message": f"Tool '{tool_name}' not implemented"}
+        import traceback
+        print(f"[LOGGER] MCP TOOL EXECUTION ERROR: {str(e)}")
+        traceback.print_exc()
+        return {"status": "error", "message": f"MCP execution error: {str(e)}"}
 
 def get_hitl_form_schema(tool_id: str, missing_params: List[str]) -> Dict[str, Any]:
     """Generate form schema with tool metadata for missing parameters."""
@@ -561,7 +593,21 @@ async def workflow_handler(websocket: WebSocket, client_openai):
     try:
         await websocket.accept()
         db = SessionLocal()
-        user_id = 1  # Default for now
+        from models.user import User
+        user = getattr(websocket.state, "user", None)
+        if user and "id" in user:
+            user_id = user["id"]
+        else:
+            user_id = 1  # Default fallback
+            # Check if the mock user 1 exists, create if not to satisfy Foreign Keys
+            mock_user = db.query(User).filter(User.id == 1).first()
+            if not mock_user:
+                try:
+                    mock_user = User(id=1, username="test_chatbot_user", password="ws_user")
+                    db.add(mock_user)
+                    db.commit()
+                except Exception:
+                    db.rollback()
         
         # Start heartbeat task
         heartbeat_task = asyncio.create_task(send_heartbeat())
@@ -682,7 +728,7 @@ async def workflow_handler(websocket: WebSocket, client_openai):
                     elif not missing:
                         # Execute the tool
                         await safe_send(websocket, {"type": "status", "message": "executing_tool", "tool_name": pending["name"]})
-                        result = await execute_google_tool(db, user_id, pending["name"], pending["arguments"])
+                        result = await execute_google_tool(websocket.app.state.mcp_client, pending["name"], pending["arguments"], user_id)
                         print(f"[LOGGER] TOOL EXECUTION ({pending['name']}): {result}")
                         await safe_send(websocket, {"type": "tool_result", "tool_name": pending["name"], "result": result})
                         
@@ -746,7 +792,148 @@ async def workflow_handler(websocket: WebSocket, client_openai):
                     state["user_goal"] = user_message  # Store for verification context
                     await state_m.save_message("user", user_message, workflow_state=state)
 
-                # --- INITIAL PLANNER CALL ---
+                # Determine if this is the first logical request
+                full_history_for_check = await state_m.get_full_history()
+                is_first_request = len([msg for msg in full_history_for_check if msg.get("role") == "assistant"]) == 0
+
+                # --- NATIVE OPENAI TOOLS CHAT LOOP (SECOND REQUEST ONWARDS) ---
+                if not is_first_request and (user_message or hitl_response):
+                    try:
+                        # Append history
+                        chat_history = await state_m.get_full_history()
+                        
+                        # Fetch the native tools based on registry
+                        openai_tools = await get_mcp_openai_tools(websocket.app.state.mcp_client)
+                        
+                        # If resolving a pending hitl directly, process the arguments
+                        if hitl_response and state.get("pending_tool"):
+                            # The hitl_response update logic already happened earlier in the code.
+                            pending = state["pending_tool"]
+                            tool_name = pending["name"]
+                            merged_args = pending["arguments"]
+                            
+                            # Execute tool
+                            await safe_send(websocket, {"type": "status", "message": "executing_tool", "tool_name": tool_name})
+                            result = await execute_google_tool(websocket.app.state.mcp_client, tool_name, merged_args, user_id)
+                            print(f"[LOGGER] TOOL EXECUTION ({tool_name}): {result}")
+                            await safe_send(websocket, {"type": "tool_result", "tool_name": tool_name, "result": result})
+                            
+                            if result.get("status") == "error" or result.get("error"):
+                                error_msg = result.get("message") or result.get("error") or "Tool execution failed"
+                                await safe_send(websocket, {
+                                    "type": "error", "message": f"Tool '{tool_name}' failed: {error_msg}",
+                                    "tool_name": tool_name, "recoverable": True
+                                })
+                                state["pending_tool"] = None
+                                await state_m.save_message("assistant", f"Error: {error_msg}", workflow_state=state)
+                                await safe_send(websocket, {"type": "workflow_complete", "status": "error", "session_id": session_id})
+                                continue
+                            
+                            state["pending_tool"] = None
+                            
+                            # Append result to history
+                            # Ensure we have the correct formatting for tool output
+                            # Add the tool_call response so the model knows what happened
+                            await state_m.save_message("tool", content=json.dumps(result), tool_name=tool_name, workflow_state=state)
+                            chat_history = await state_m.get_full_history()
+                        
+                        # System prompt
+                        chat_history.insert(0, {"role": "system", "content": "You are a professional assistant. You have access to tools. Always formulate your final answer following the structured FORMAT_SCHEMA. Since the chat supports UI structured rendering, ALWAYS OUTPUT JSON matching the structured_article schema in your final text."})
+                        
+                        while True:
+                            await safe_send(websocket, {"type": "status", "message": "thinking"})
+                            # Execute Native stream
+                            stream = await client_openai.chat.completions.create(
+                                model="gpt-4o",
+                                messages=chat_history[-20:],
+                                tools=openai_tools,
+                                tool_choice="auto",
+                                max_tokens=2048
+                            )
+                            
+                            response_message = stream.choices[0].message
+                            print(f"[LOGGER] AI RESPONSE (workflow_handler main loop): {str(response_message)}")
+                            
+                            # If no tool calls, it's returning the final message
+                            if not response_message.tool_calls:
+                                # Send chunked or full text? Since the UI expects FORMAT_SCHEMA JSON, we just send it.
+                                # Try parsing it just to be safe
+                                final_content = response_message.content
+                                try:
+                                    structured_data = json.loads(final_content)
+                                    await safe_send(websocket, {"type": "content", "chunk": json.dumps(structured_data)})
+                                    await state_m.save_message("assistant", json.dumps(structured_data), workflow_state=state)
+                                except Exception:
+                                    await safe_send(websocket, {"type": "content", "chunk": final_content})
+                                    await state_m.save_message("assistant", final_content, workflow_state=state)
+                                
+                                await safe_send(websocket, {
+                                    "type": "workflow_complete", 
+                                    "status": "success",
+                                    "session_id": session_id,
+                                    "message": "Workflow completed successfully"
+                                })
+                                await safe_send(websocket, {"type": "done", "session_id": session_id})
+                                break
+                            
+                            # Has tool calls
+                            chat_history.append({"role": "assistant", "content": response_message.content or "", "tool_calls": [tc.model_dump() for tc in response_message.tool_calls]})
+                            await state_m.save_message("assistant", content="Calling tools...", workflow_state=state) # placeholder
+                            
+                            # Execute each tool call
+                            needs_hitl = False
+                            for tool_call in response_message.tool_calls:
+                                tool_name = tool_call.function.name
+                                try:
+                                    tool_args = json.loads(tool_call.function.arguments)
+                                except Exception:
+                                    tool_args = {}
+                                
+                                tool_def = next((t for t in TOOLS_REGISTRY if t["tool_id"] == tool_name), None)
+                                
+                                # Check missing
+                                missing = []
+                                if tool_def:
+                                    for req in tool_def.get("must_required_params", []):
+                                        if req not in tool_args or tool_args[req] is None or str(tool_args[req]).strip() == "":
+                                            missing.append(req)
+                                
+                                if missing:
+                                    state["pending_tool"] = {"name": tool_name, "arguments": tool_args, "hitl_type": "form", "tool_call_id": tool_call.id}
+                                    schema = get_hitl_form_schema(tool_name, missing)
+                                    await safe_send(websocket, {"type": "hitl_form", "schema": schema})
+                                    await state_m.save_message("assistant", f"Need parameters for {tool_name}", hitl_type="form", hitl_schema=schema, workflow_state=state)
+                                    needs_hitl = True
+                                    break
+                                
+                                # Execute
+                                await safe_send(websocket, {"type": "status", "message": "executing_tool", "tool_name": tool_name})
+                                result = await execute_google_tool(websocket.app.state.mcp_client, tool_name, tool_args, user_id)
+                                await safe_send(websocket, {"type": "tool_result", "tool_name": tool_name, "result": result})
+                                
+                                # Append to history for next loop
+                                chat_history.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": tool_name,
+                                    "content": json.dumps(result)
+                                })
+                                await state_m.save_message("tool", content=json.dumps(result), tool_name=tool_name, workflow_state=state)
+                            
+                            if needs_hitl:
+                                break
+                    except Exception as e:
+                        print(f"[ERROR] Native tool execution failed: {e}")
+                        traceback.print_exc()
+                        await safe_send(websocket, {
+                            "type": "error", "message": f"Execution error: {str(e)}", "recoverable": True
+                        })
+                        await safe_send(websocket, {"type": "workflow_complete", "status": "error", "session_id": session_id})
+                    
+                    # Stop further processing in normal loop since it's a second request
+                    continue
+
+                # --- INITIAL PLANNER CALL FOR FIRST REQUEST ---
                 if user_message and not state.get("plan"):
                     try:
                         await safe_send(websocket, {"type": "status", "message": "thinking"})
@@ -854,7 +1041,7 @@ async def workflow_handler(websocket: WebSocket, client_openai):
                     # Execute tool
                     # SEPARATION OF CONCERNS: Send status as distinct event
                     await safe_send(websocket, {"type": "status", "message": "executing_tool", "tool_name": tool_name})
-                    result = await execute_google_tool(db, user_id, tool_name, merged_args)
+                    result = await execute_google_tool(websocket.app.state.mcp_client, tool_name, merged_args, user_id)
                     print(f"[LOGGER] TOOL EXECUTION ({tool_name}): {result}")
                     
                     # SPECIAL CASE: list_drive_files handles doc discovery

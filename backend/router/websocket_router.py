@@ -3,6 +3,7 @@ from controller.websocket_controller import websocket_handler
 
 @router.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):
+    print(f"[ROUTE LOGGER] 🟢 WebSocket CONNECTED: /ws/chat")
     # Retrieve dependencies from app.state
     # Note: In FastAPI WebSockets, app state is accessible via websocket.app.state
     client_openai = websocket.app.state.client_openai
