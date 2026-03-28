@@ -1,12 +1,12 @@
-import { AuthResponse, LoginCredentials, SignUpCredentials } from '../types/auth';
+import { AuthResponse, LoginCredentials, SignUpCredentials, GoogleStatus } from '../types/auth';
 
 const TOKEN_KEY = 'auth_token';
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ; // Update this to your FastAPI URL
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ;
 
 export const authService = {
   async login(credentials: LoginCredentials): Promise<AuthResponse> {
     try {
-      console.log('API_BASE_URL:', API_BASE_URL); // Debugging line
+      console.log('API_BASE_URL:', API_BASE_URL);
       const response = await fetch(`${API_BASE_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -15,7 +15,6 @@ export const authService = {
 
       const data = await response.json();
 
-      // Backend returns { "status": 1, "message": "token" }
       if (response.ok && data.status === 1) {
         if (typeof window !== 'undefined') {
           localStorage.setItem(TOKEN_KEY, data.Token);
@@ -52,6 +51,31 @@ export const authService = {
       return { success: false, message: data.detail || 'Signup failed' };
     } catch (error) {
       return { success: false, message: `Network error occurred: ${error}` };
+    }
+  },
+
+  async fetchMe(): Promise<{ user: { id: string; username: string } | null; google: GoogleStatus | null }> {
+    const token = this.getToken();
+    if (!token) return { user: null, google: null };
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/me`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.status === 1) {
+        return {
+          user: data.user,
+          google: data.google || { connected: false },
+        };
+      }
+
+      return { user: null, google: null };
+    } catch (error) {
+      console.error('fetchMe failed:', error);
+      return { user: null, google: null };
     }
   },
 

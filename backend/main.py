@@ -89,35 +89,45 @@ PUBLIC_PATHS = {
 from fastapi import Request,responses
 import time,traceback,asyncio
 @app.middleware("http")
-async def middleware(request,api_function):
+async def middleware(request: Request, api_function):
     try:
-        #start
-        start=time.time()
-        response_type=None
-        response=None
-        error=None
-        api=request.url.path
-        request.state.user={}
-        #auth check
-        request.state.user = await function_token_check(
-            request,
-            request.app.state.config_key_root,
-            request.app.state.config_key_jwt
-        )
-        if not response:
-            print(f"[ROUTE LOGGER] 🟢 HTTP Request STARTED: {request.method} {api}")
+        start = time.time()
+        api = request.url.path
+        request.state.user = {}
+
+        # 1. Skip Auth for Public Paths
+        if api in PUBLIC_PATHS:
+            print(f"[AUTH] Skipping token check for public path: {api}")
+        else:
+            # 2. Token Check with its own Try-Except
+            try:
+                request.state.user = await function_token_check(
+                    request,
+                    request.app.state.config_key_root,
+                    request.app.state.config_key_jwt
+                )
+            except Exception as e:
+                print(f"[AUTH ERROR] Token validation failed: {e}")
+                # We don't crash here unless the route is strictly private
+                if api.startswith(("/private", "/admin", "/my")):
+                    return function_return_error(f"Authentication failed: {str(e)}")
+
+        # 3. Handler Execution
+        print(f"[ROUTE LOGGER] 🟢 HTTP Request STARTED: {request.method} {api}")
+        try:
             response = await api_function(request)
             process_time = time.time() - start
             print(f"[ROUTE LOGGER] 🔴 HTTP Request COMPLETED: {request.method} {api} (Took {process_time:.4f}s)")
-    #error
+            return response
+        except Exception as e:
+            error_trace = traceback.format_exc()
+            print(f"[HANDLER ERROR] Error in {api}:\n{error_trace}")
+            return function_return_error(str(e))
+
     except Exception as e:
-        error=str(e)
-        print("error is coming from middleware")
-        response=function_return_error(error)
-        response_type=5
-        print(error)
-    #final
-    return response
+        print(f"[CRITICAL MIDDLEWARE ERROR] {str(e)}")
+        print(traceback.format_exc())
+        return function_return_error("Internal server error in middleware")
 
 
 if __name__ == "__main__":

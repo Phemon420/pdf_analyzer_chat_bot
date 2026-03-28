@@ -3,7 +3,7 @@ import os
 from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
 from models import SessionLocal
-from services import google_services
+from agents import google_services
 
 # Initialize FastMCP Server
 mcp = FastMCP("GoogleWorkspaceTools")

@@ -5,6 +5,15 @@ export interface User {
   avatar?: string;
 }
 
+export interface GoogleStatus {
+  connected: boolean;
+  email?: string;
+  name?: string;
+  picture?: string;
+  expires_at?: string;
+  scopes?: string[];
+}
+
 export interface AuthResponse {
   success: boolean;
   token?: string;

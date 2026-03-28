@@ -5,7 +5,7 @@ import { ChatLayout } from '../../components/chat/ChatLayout';
 import { MessageBubble } from '../../components/chat/MessageBubble';
 import { ChatInput } from '../../components/chat/ChatInput';
 import { ChatSession, Message } from '../../lib/types/chat';
-import { fetchChatHistory, fetchSessionMessages, sendMessageStream } from '../../lib/api/chatService';
+import { fetchChatHistory, fetchSessionMessages, sendMessageStream, createThread } from '../../lib/api/chatService';
 import { workflowService, ConnectionState } from '../../lib/api/workflowService';
 import PDFViewer from '../../components/pdf/pdfviewer';
 import { savePdfToSession, loadPdfFromSession } from '../../lib/pdfSession';
@@ -41,8 +41,13 @@ export default function ChatPage() {
     loadingTimeoutRef.current = setTimeout(() => {
       console.warn('[CHAT] Loading safety timeout reached (60s)');
       clearLoading();
-    }, 60000); // 1 minute safety timer
+    }, 60000);
   }, [clearLoading]);
+
+  const refreshSidebar = useCallback(async () => {
+    const history = await fetchChatHistory();
+    setSessions(history);
+  }, []);
 
   // --- WEBSOCKET SETUP ---
   useEffect(() => {
@@ -80,10 +85,12 @@ export default function ChatPage() {
           case 'done':
             clearLoading();
             if (event.session_id) setCurrentSessionId(event.session_id);
+            refreshSidebar();
             break;
           case 'workflow_complete':
             clearLoading();
             if (event.session_id) setCurrentSessionId(event.session_id);
+            refreshSidebar();
             // Show completion status to user
             if (event.status === 'success') {
               console.log('[WORKFLOW] Completed successfully');
@@ -132,7 +139,7 @@ export default function ChatPage() {
       workflowService.disconnect();
       if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
     };
-  }, [clearLoading]);
+  }, [clearLoading, refreshSidebar]);
 
   const addSystemMessage = (content: string) => {
     setMessages((prev) => [
@@ -274,10 +281,8 @@ export default function ChatPage() {
     async function loadData() {
       const history = await fetchChatHistory();
       setSessions(history);
-      if (history.length > 0) selectSession(history[0].id);
       if (window.innerWidth >= 1024) setIsSidebarOpen(true);
 
-      // Fetch Google connection status for profile info
       const token = localStorage.getItem('auth_token');
       if (token) {
         try {
@@ -341,7 +346,6 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, assistantMessage]);
 
     if (file) {
-      // Use SSE for PDF chat
       await sendMessageStream(
         userMessageContent, file, currentSessionId,
         (chunk) => updateLastAssistantMessage(chunk),
@@ -349,12 +353,20 @@ export default function ChatPage() {
           setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, citations } : m));
         },
         (toolType) => setLastAssistantTool(toolType),
-        (sessionId) => { clearLoading(); setCurrentSessionId(sessionId); },
+        (sessionId) => { clearLoading(); setCurrentSessionId(sessionId); refreshSidebar(); },
         (error) => { console.error(error); clearLoading(); }
       );
     } else {
-      // Use WebSocket for Workflow chat
-      workflowService.sendMessage(userMessageContent, currentSessionId);
+      let activeSessionId = currentSessionId;
+      if (!activeSessionId) {
+        const newThread = await createThread();
+        if (newThread) {
+          activeSessionId = newThread.id;
+          setCurrentSessionId(newThread.id);
+          setSessions(prev => [newThread, ...prev]);
+        }
+      }
+      workflowService.sendMessage(userMessageContent, activeSessionId);
     }
   };
 

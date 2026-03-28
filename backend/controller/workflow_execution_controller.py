@@ -3,15 +3,14 @@ import json
 import time
 import asyncio
 import traceback
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
-import time
-import asyncio
-import traceback
-from typing import Optional, Dict, Any, List
-from sqlalchemy.orm import Session
-from models import SessionLocal, ChatMessage
-from services import google_services
+from agents import google_services
 from fastapi import WebSocketDisconnect
+from controller.thread_store import (
+    get_or_create_thread, add_message,
+    get_openai_history, get_messages
+)
 
 # --- CONSTANTS ---
 HEARTBEAT_INTERVAL = 30  # seconds
@@ -47,97 +46,47 @@ def load_tools_registry() -> List[Dict[str, Any]]:
 TOOLS_REGISTRY = load_tools_registry()
 
 def get_openai_tools_from_registry() -> List[Dict[str, Any]]:
-    # Replaced by async get_mcp_openai_tools function
+    # Replaced by internal sequential logic
     pass
 
-async def get_mcp_openai_tools(mcp_client) -> List[Dict[str, Any]]:
-    tools = []
-    try:
-        mcp_tools = await mcp_client.list_tools()
-        for t in getattr(mcp_tools, "tools", []):
-            schema = dict(t.inputSchema) if hasattr(t, "inputSchema") else {}
-            if "properties" in schema and "user_id" in schema["properties"]:
-                del schema["properties"]["user_id"]
-            if "required" in schema and "user_id" in schema["required"]:
-                schema["required"] = [r for r in schema["required"] if r != "user_id"]
-                
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": getattr(t, "name", ""),
-                    "description": getattr(t, "description", ""),
-                    "parameters": schema
-                }
-            })
-    except Exception as e:
-        print(f"Error fetching MCP tools: {e}")
-    return tools
-
-# Local memory cache for workflow state
 local_workflow_cache = {}
 
 class WorkflowState:
-    """Manages workflow state for a session with Database and Local Cache"""
-    
-    def __init__(self, session_id: str, db: Session, user_id: int):
-        self.session_id = session_id
-        self.db = db
-        self.user_id = user_id
-    
+    def __init__(self, thread_id: str):
+        self.thread_id = thread_id
+
     async def load(self) -> Dict[str, Any]:
-        """Load workflow state from Local Cache"""
-        if self.session_id in local_workflow_cache:
-            return local_workflow_cache[self.session_id]
-            
+        if self.thread_id in local_workflow_cache:
+            return local_workflow_cache[self.thread_id]
         return {
             "workflow_id": None,
             "status": "active",
             "history": [],
             "previous_response_id": None,
-            "pending_tool": None,  # { name, arguments, hitl_type }
+            "pending_tool": None,
             "current_step": 0,
             "user_goal": None,
-            "execution_context": {},  # Context passed between steps
+            "execution_context": {},
             "plan": None
         }
-    
+
     async def save(self, state: Dict[str, Any]):
-        """Save workflow state to Local Cache"""
         if len(state.get("history", [])) > 20:
             state["history"] = state["history"][-20:]
-        
-        local_workflow_cache[self.session_id] = state
+        local_workflow_cache[self.thread_id] = state
 
     async def save_message(self, role: str, content: str = None, tool_name: str = None, hitl_type: str = None, hitl_schema: Dict = None, workflow_state: Dict = None):
-        """Persist message to database and update cache"""
-        msg = ChatMessage(
-            session_id=self.session_id,
-            user_id=self.user_id,
-            role=role,
-            content=content,
-            tool_name=tool_name,
-            hitl_type=hitl_type,
-            hitl_schema=hitl_schema
-        )
-        self.db.add(msg)
-        self.db.commit()
-        
+        extra = {}
+        if hitl_type:
+            extra["hitl_type"] = hitl_type
+        if hitl_schema:
+            extra["hitl_schema"] = hitl_schema
+        add_message(self.thread_id, role, content, tool_name=tool_name, extra=extra if extra else None)
         if workflow_state:
             await self.save(workflow_state)
 
     async def get_full_history(self) -> List[Dict]:
-        """Retrieve chat history for the current session from database"""
-        messages = self.db.query(ChatMessage).filter(ChatMessage.session_id == self.session_id).order_by(ChatMessage.created_at.asc()).all()
-        history = []
-        for m in messages:
-            if m.role == "tool":
-                # OpenAI gpt-4o requires tool role messages to follow assistant tool_calls.
-                # Since we execute manually, we'll map these to 'system' role for context.
-                msg = {"role": "system", "content": f"Output from tool '{m.tool_name}': {m.content}"}
-            else:
-                msg = {"role": m.role, "content": m.content}
-            history.append(msg)
-        return history
+        return get_openai_history(self.thread_id)
 
 # --- STRUCTURED OUTPUT SCHEMA ---
 FORMAT_SCHEMA = {
@@ -236,6 +185,12 @@ FORMAT_SCHEMA = {
     }
 }
 
+def get_current_ist_time() -> str:
+    """Returns the current date and time in IST format."""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist)
+    return now_ist.strftime("%A, %Y-%m-%d %H:%M:%S IST")
+
 async def extract_variables(client_openai, user_message: str) -> Dict[str, Any]:
     """Pre-extract potential tool parameters from the user message with improved mapping."""
     prompt = f"""
@@ -273,60 +228,50 @@ async def extract_variables(client_openai, user_message: str) -> Dict[str, Any]:
     # Remove null values
     return {k: v for k, v in extracted.items() if v is not None and v != ""}
 
-async def plan_workflow(client_openai, user_message: str, tools_registry: List[Dict], extracted_vars: Dict[str, Any] = None) -> List[Dict]:
-    """Decide the order of tools and extract initial variables with proper execution sequence."""
-    tools_info = []
-    for tool in tools_registry:
-        tools_info.append({
-            "tool_id": tool["tool_id"],
-            "description": tool["tool_description"],
-            "required_params": tool["must_required_params"],
-            "optional_params": tool.get("optional_params", []),
-            "when_to_use": tool.get("exact_precise_tool_use", "")
-        })
+async def plan_workflow(client_openai, user_message: str, history: List[Dict], current_time: str) -> Dict[str, Any]:
+    """Uses LLM to create a step-by-step plan for the user's request with IST time context."""
+    tools_context = json.dumps(TOOLS_REGISTRY, indent=2)
+    system_prompt = f"""
+    You are an expert Workflow Planner for a Google Services agent (Gmail, Drive, Calendar).
+    Current Time (IST): {current_time}
+    Available Tools: {tools_context}
     
-    prompt = f"""
-    Analyze the user query and available tools to create an execution plan.
-    User Query: "{user_message}"
-    Available Tools: {json.dumps(tools_info, indent=2)}
-    Extracted Variables: {json.dumps(extracted_vars or {}, indent=2)}
+    CRITICAL RULES:
+    1. Resolve all relative dates (today, tomorrow, next week) using the provided IST time.
+    2. Respond ONLY with a JSON object.
+    3. Use provided tool definitions from the context.
+    4. If a step depends on another, use "output_from_step_X" as the variable value.
+    5. Identify missing parameters if they are not in the message or history.
     
-    IMPORTANT: You MUST ONLY use the tools provided in the 'Available Tools' list. Do not imagine or hallucinate tools that are not listed.
-    If the user's request requires a tool that is not available, include only the available steps and explain the limitation in the summary.
-    
-    Create a step-by-step execution plan that:
-    1. Orders tools in the correct sequence (dependencies first)
-    2. Maps extracted variables to the correct tool parameters
-    3. Identifies which parameters need to be collected from the user
-    4. Specifies how results from one step feed into the next
-    
-    Return a JSON object with a "plan" array:
+    JSON Schema:
     {{
-      "plan": [
-        {{
-          "step": 1,
-          "tool_id": "tool_name",
-          "variables": {{ "param1": "value_from_extracted_or_previous_step" }},
-          "missing_variables": ["param2"],
-          "description": "What this step accomplishes",
-          "depends_on_step": null,
-          "output_used_by": [2]
-        }}
-      ],
-      "summary": "Brief overview of the entire workflow"
+        "plan": [
+            {{
+                "step": 1,
+                "tool_id": "tool_name",
+                "variables": {{ "arg1": "val1" }},
+                "missing_variables": ["name"],
+                "description": "Short explanation",
+                "depends_on_step": null,
+                "output_used_by": [2]
+            }}
+        ],
+        "summary": "High level plan description"
     }}
     """
-    response = await client_openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are a professional workflow architect. You create structured, efficient plans for complex tasks."},
-            {"role": "user", "content": prompt}
-        ],
-        response_format={"type": "json_object"}
-    )
-    print(f"[LOGGER] AI RESPONSE (plan_workflow): {response.choices[0].message.content}")
-    plan_data = json.loads(response.choices[0].message.content)
-    return plan_data.get("plan", plan_data.get("calls", []))
+    try:
+        response = await client_openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"User Goal: {user_message}\nHistory: {json.dumps(history)}"}
+            ],
+            response_format={"type": "json_object"}
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"[PLANNING ERROR] {e}")
+        return {"plan": [], "summary": "Failed to generate plan."}
 
 async def verify_step_result(client_openai, tool_name: str, tool_args: Dict, tool_result: Dict, user_goal: str, remaining_plan: List[Dict], execution_context: Dict) -> Dict[str, Any]:
     """LLM verification of tool execution result with context for next step."""
@@ -507,27 +452,56 @@ def get_hitl_selection_schema(title: str, message: str, options: List[Dict], con
         "none_label": "None of these files"
     }
 
-async def execute_google_tool(mcp_client, tool_name: str, arguments: Dict[str, Any], user_id: int) -> Dict[str, Any]:
-    """Execute tools using FastMCP Client"""
-    arguments["user_id"] = user_id
-    print(f"[LOGGER] EXECUTING MCP TOOL: {tool_name} with args: {arguments}")
+async def extract_params_from_hitl(client_openai, tool_id: str, user_input: str) -> Dict[str, Any]:
+    """Step 4: LLM call to extract parameters from user input based on tool definition."""
+    tool_def = next((t for t in TOOLS_REGISTRY if t["tool_id"] == tool_id), None)
+    if not tool_def:
+        return {}
+
+    prompt = f"""
+    The user is providing information for the tool: "{tool_id}"
+    Tool Description: {tool_def.get('tool_description')}
+    Required Parameters: {tool_def.get('must_required_params')}
+    Optional Parameters: {tool_def.get('optional_params')}
+    
+    User's Input: "{user_input}"
+    
+    Extract the relevant parameters from the input. Return ONLY a JSON object.
+    """
     try:
-        result = await mcp_client.call_tool(tool_name, arguments=arguments)
-        print(f"[LOGGER] RAW MCP TOOL RESULT: {result}")
-        if result.content and len(result.content) > 0:
-            text = result.content[0].text
-            if getattr(result, "isError", False):
-                return {"status": "error", "message": text}
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                return {"status": "error", "message": text}
-        return {"status": "success", "message": "Tool executed with empty response"}
+        response = await client_openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a precise data extraction engine. Extract parameters accurately into JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"}
+        )
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
-        import traceback
-        print(f"[LOGGER] MCP TOOL EXECUTION ERROR: {str(e)}")
+        print(f"[EXTRACTION ERROR] {e}")
+        return {}
+
+async def execute_google_tool(tool_name: str, arguments: Dict[str, Any], user_id: int) -> Dict[str, Any]:
+    """Execute tools directly using the local agents package (bypassing MCP)."""
+    db = SessionLocal()
+    try:
+        # Step 2: Tool execution handled by local files
+        if not hasattr(google_services, tool_name):
+            return {"status": "error", "message": f"Tool '{tool_name}' not found locally."}
+        
+        func = getattr(google_services, tool_name)
+        print(f"[LOGGER] EXECUTING LOCAL TOOL: {tool_name} for user {user_id}")
+        
+        # All modular tools in agents/ follow the signature: (db, user_id, parameters)
+        result = await func(db, user_id, arguments)
+        return result
+    except Exception as e:
+        print(f"[LOCAL EXECUTION ERROR] {tool_name}: {str(e)}")
         traceback.print_exc()
-        return {"status": "error", "message": f"MCP execution error: {str(e)}"}
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
 
 def get_hitl_form_schema(tool_id: str, missing_params: List[str]) -> Dict[str, Any]:
     """Generate form schema with tool metadata for missing parameters."""
@@ -566,654 +540,245 @@ def get_hitl_form_schema(tool_id: str, missing_params: List[str]) -> Dict[str, A
         "fields": fields
     }
 
+async def resolve_parameters(client_openai, tool_id: str, variables: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolves output_from_step_X placeholders and refines email content."""
+    resolved = variables.copy()
+    context = state.get("execution_context", {})
+    
+    # 1. Resolve placeholders like output_from_step_1
+    for key, value in resolved.items():
+        if isinstance(value, str) and "output_from_step_" in value:
+            try:
+                # Find step number
+                import re
+                match = re.search(r"output_from_step_(\d+)", value)
+                if match:
+                    step_num = match.group(1)
+                    step_key = f"step_{step_num}_result"
+                    if step_key in context:
+                        result = context[step_key]
+                        # Mapping logic for different tool outputs
+                        if isinstance(result, dict):
+                            if "id" in result: resolved[key] = result["id"]
+                            elif "content" in result: resolved[key] = result["content"]
+                            elif "files" in result and len(result["files"]) > 0:
+                                resolved[key] = result["files"][0]["id"]
+                            else: resolved[key] = str(result)
+                        else:
+                            resolved[key] = str(result)
+            except Exception as e:
+                print(f"[RESOLVE ERROR] Failed to resolve {value}: {e}")
+
+    # 2. Email Refinement ("Write down more betterly")
+    if tool_id == "send_email" and resolved.get("body"):
+        print(f"[LOGGER] Refining email body for more professional tone...")
+        prompt = f"""
+        Refine the following email body to be professional, well-structured, and clear. 
+        Maintain all key information but improve the tone and formatting.
+        Raw Content: {resolved['body']}
+        
+        Return ONLY the improved email body.
+        """
+        try:
+            response = await client_openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are a professional communication expert."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            resolved["body"] = response.choices[0].message.content
+        except Exception as e:
+            print(f"[REFINEMENT ERROR] {e}")
+            
+    return resolved
+
 async def workflow_handler(websocket: WebSocket, client_openai):
-    """Main WebSocket workflow handler with heartbeat, HITL, and LLM verification."""
     session_id = "unknown"
-    db = None
     heartbeat_task = None
     last_pong_time = time.time()
-    
+
     async def send_heartbeat():
-        """Send periodic heartbeat pings to keep connection alive."""
         nonlocal last_pong_time
         while True:
             try:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
                 if not await safe_send(websocket, {"type": "ping", "timestamp": time.time()}):
-                    print("[HEARTBEAT] Socket closed, stopping heartbeat pings")
                     break
-                
-                # Check if we've received a pong recently
                 if time.time() - last_pong_time > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT:
-                    print(f"[HEARTBEAT] No pong received in {HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT}s, connection may be stale")
+                    print(f"[HEARTBEAT] No pong in {HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT}s")
             except Exception as e:
-                print(f"[HEARTBEAT] Error sending ping: {e}")
+                print(f"[HEARTBEAT] Error: {e}")
                 break
-    
+
     try:
         await websocket.accept()
-        db = SessionLocal()
-        from models.user import User
         user = getattr(websocket.state, "user", None)
-        if user and "id" in user:
-            user_id = user["id"]
-        else:
-            user_id = 1  # Default fallback
-            # Check if the mock user 1 exists, create if not to satisfy Foreign Keys
-            mock_user = db.query(User).filter(User.id == 1).first()
-            if not mock_user:
-                try:
-                    mock_user = User(id=1, username="test_chatbot_user", password="ws_user")
-                    db.add(mock_user)
-                    db.commit()
-                except Exception:
-                    db.rollback()
-        
-        # Start heartbeat task
+        user_id = user["id"] if user and "id" in user else 1
+
         heartbeat_task = asyncio.create_task(send_heartbeat())
         
         while True:
             data = await websocket.receive_text()
             try:
                 message_data = json.loads(data)
-                
-                # Handle heartbeat pong
                 if message_data.get("type") == "pong":
                     last_pong_time = time.time()
                     continue
-                
-                # Handle client heartbeat
                 if message_data.get("type") == "heartbeat":
                     await websocket.send_text(json.dumps({"type": "heartbeat_ack", "timestamp": time.time()}))
                     continue
-                
+
                 user_message = message_data.get("message")
-                session_id = message_data.get("session_id", "default")
+                incoming_thread_id = message_data.get("session_id")
                 hitl_response = message_data.get("hitl_response")
             except Exception as e:
                 print(f"[WS ERROR] Failed to parse message: {e}")
                 continue
 
             try:
-                if user_message:
-                    print(f"[LOGGER] USER MESSAGE ({session_id}): {user_message}")
+                thread = get_or_create_thread(incoming_thread_id)
+                session_id = thread["id"]
 
-                state_m = WorkflowState(session_id, db, user_id)
+                state_m = WorkflowState(session_id)
                 state = await state_m.load()
                 
-                # --- AUTO-RESET STATE FOR NEW MESSAGES ---
-                # If we get a fresh user message (not a HITL response),
-                # we should clear any old plan and pending HITL to allow a new one to be generated.
-                # EXCEPTION: If we have a pending tool, we only clear if it's NOT a confirmation/selection
-                # that was interrupted. This allows some resilience to disconnects.
+                # Get Current IST Time for LLM Context
+                current_time_ist = get_current_ist_time()
+                print(f"[LOGGER] Processing message with IST Time Context: {current_time_ist}")
+
+                # --- STEP 1: PLANNING (FIRST CALL) ---
                 if user_message and not hitl_response:
-                    has_pending = bool(state.get("pending_tool"))
-                    has_plan = bool(state.get("plan"))
-                    
-                    if has_pending or has_plan:
-                        # If the user is just saying "yes" or "no" as a text message, 
-                        # we might want to let the existing pending tool handle it.
-                        # For now, we clear if it's a completely NEW intent.
-                        print(f"[LOGGER] New message received ({session_id}). State cleanup: pending={has_pending}, plan={has_plan}")
-                        state["plan"] = None
-                        state["pending_tool"] = None
-                        state["current_step"] = 0
-                        state["execution_context"] = {}
-                
-                # --- HANDLE HITL RESPONSE ---
-                if hitl_response and state.get("pending_tool"):
-                    print(f"[LOGGER] HITL RESPONSE ({session_id}): {hitl_response}")
-                    pending = state["pending_tool"]
-                    
-                    if pending["hitl_type"] == "form":
-                        pending["arguments"].update(hitl_response)
-                    elif pending["hitl_type"] == "selection":
-                        selected_item = hitl_response.get("selected_item")
-                        if not selected_item:
-                            await safe_send(websocket, {"type": "content", "chunk": "No selection made. Action cancelled."})
-                            state["pending_tool"] = None
-                            state["current_step"] += 1
-                            await state_m.save_message("assistant", "Action cancelled.", workflow_state=state)
-                            # REMOVED premature 'done' signal
-                            continue
-                        
-                        # Update variables for future steps with the selected ID
-                        selected_id = selected_item.get("id")
-                        selected_name = selected_item.get("name")
-                        
-                        # Add to execution context
-                        state["execution_context"]["selected_file_id"] = selected_id
-                        state["execution_context"]["selected_file_name"] = selected_name
-                        
-                        # Specifically update file_id for next steps if they need it
-                        for future_step in state.get("plan", [])[state["current_step"] + 1:]:
-                            if "file_id" in future_step.get("variables", {}):
-                                future_step["variables"]["file_id"] = selected_id
-                            if "missing_variables" in future_step and "file_id" in future_step["missing_variables"]:
-                                future_step["missing_variables"].remove("file_id")
-                                future_step["variables"]["file_id"] = selected_id
-
-                        await safe_send(websocket, {"type": "content", "chunk": f"Selected file: {selected_name}"})
-                        state["pending_tool"] = None
-                        state["current_step"] += 1
-                        await state_m.save_message("assistant", f"User selected file: {selected_name}", workflow_state=state)
-                        # Workflow continues in the next loop iteration
-                    elif pending["hitl_type"] == "confirmation":
-                        if hitl_response.get("approved") is False:
-                            await safe_send(websocket, {"type": "content", "chunk": "Action cancelled."})
-                            state["pending_tool"] = None
-                            state["current_step"] += 1  # Advance to next step even if cancelled
-                            await state_m.save_message("assistant", "Action cancelled.", workflow_state=state)
-                            # REMOVED premature 'done' signal
-                            continue
-                    
-                    if pending["hitl_type"] == "form":
-                        # Save user's input to history so LLM can see it in the next resolution pass
-                        input_summary = ", ".join([f"{k}: {v}" for k, v in hitl_response.items()])
-                        await state_m.save_message("user", f"I've provided the missing details: {input_summary}", workflow_state=state)
-                        
-                        # Use the new resolution loop
-                        pending["arguments"].update(hitl_response)
-                        missing = [] # Will be checked by second pass resolution
-                    
-                    # Special check: If this was a selection, we've already updated the context and future steps.
-                    # We should NOT re-execute the search tool (e.g. list_drive_files), 
-                    # but we MUST let the code fall through to the 'while state.get("plan")' loop below
-                    # so that it picks up the NEXT step in the plan.
-                    if pending.get("hitl_type") == "selection":
-                        print(f"[LOGGER] Selection handled for {pending['name']}, proceeding to next step.")
-                        state["pending_tool"] = None
-                        # Note: current_step was already incremented in the selection branch above
-                    
-                    elif not missing:
-                        # Execute the tool
-                        await safe_send(websocket, {"type": "status", "message": "executing_tool", "tool_name": pending["name"]})
-                        result = await execute_google_tool(websocket.app.state.mcp_client, pending["name"], pending["arguments"], user_id)
-                        print(f"[LOGGER] TOOL EXECUTION ({pending['name']}): {result}")
-                        await safe_send(websocket, {"type": "tool_result", "tool_name": pending["name"], "result": result})
-                        
-                        # CHECK FOR TOOL ERROR - break stream immediately
-                        if result.get("status") == "error" or result.get("error"):
-                            error_msg = result.get("message") or result.get("error") or "Tool execution failed"
-                            print(f"[TOOL ERROR] {pending['name']}: {error_msg}")
-                            await safe_send(websocket, {
-                                "type": "error", 
-                                "message": f"Tool '{pending['name']}' failed: {error_msg}",
-                                "tool_name": pending["name"],
-                                "recoverable": True
-                            })
-                            # Clear pending and reset state
-                            state["pending_tool"] = None
-                            state["plan"] = None
-                            state["execution_context"] = {}
-                            await state_m.save_message("assistant", f"Error: {error_msg}", workflow_state=state)
-                            await safe_send(websocket, {"type": "workflow_complete", "status": "error", "session_id": session_id})
-                            continue
-                        
-                        # LLM Verification for successful execution
-                        remaining_plan = state.get("plan", [])[state["current_step"] + 1:] if state.get("plan") else []
-                        verification = await verify_step_result(
-                            client_openai, 
-                            pending["name"], 
-                            pending["arguments"], 
-                            result,
-                            state.get("user_goal", ""),
-                            remaining_plan,
-                            state.get("execution_context", {})
-                        )
-                        print(f"[LOGGER] VERIFICATION ({pending['name']}): {verification}")
-                        
-                        # Update execution context with verified results
-                        if verification.get("context_for_next_step"):
-                            state["execution_context"].update(verification["context_for_next_step"])
-                        if verification.get("updated_variables"):
-                            for future_step in state.get("plan", [])[state["current_step"] + 1:]:
-                                future_step["variables"].update(verification["updated_variables"])
-                        
-                        state["pending_tool"] = None
-                        state["current_step"] += 1
-                        await state_m.save_message("tool", content=json.dumps(result), tool_name=pending["name"], workflow_state=state)
-                        
-                        # Check if verification says to stop
-                        if not verification.get("should_continue", True):
-                            await safe_send(websocket, {"type": "content", "chunk": verification.get("error_recovery", "Workflow stopped due to error.")})
-                            await safe_send(websocket, {"type": "workflow_complete", "status": "stopped", "session_id": session_id})
-                            # Add 'done' here as it's a stopping point
-                            await safe_send(websocket, {"type": "done", "session_id": session_id})
-                            continue
-                    else:
-                        schema = get_hitl_form_schema(pending["name"], missing)
-                        await safe_send(websocket, {"type": "hitl_form", "schema": schema})
-                        await state_m.save_message("assistant", "Missing parameters for tool.", hitl_type="form", hitl_schema=schema, workflow_state=state)
-                        continue
-
-                # --- SAVE USER MESSAGE if present ---
-                if user_message:
-                    state["user_goal"] = user_message  # Store for verification context
+                    print(f"[LOGGER] USER MESSAGE ({session_id}): {user_message}")
                     await state_m.save_message("user", user_message, workflow_state=state)
-
-                # Determine if this is the first logical request
-                full_history_for_check = await state_m.get_full_history()
-                is_first_request = len([msg for msg in full_history_for_check if msg.get("role") == "assistant"]) == 0
-
-                # --- NATIVE OPENAI TOOLS CHAT LOOP (SECOND REQUEST ONWARDS) ---
-                if not is_first_request and (user_message or hitl_response):
-                    try:
-                        # Append history
-                        chat_history = await state_m.get_full_history()
-                        
-                        # Fetch the native tools based on registry
-                        openai_tools = await get_mcp_openai_tools(websocket.app.state.mcp_client)
-                        
-                        # If resolving a pending hitl directly, process the arguments
-                        if hitl_response and state.get("pending_tool"):
-                            # The hitl_response update logic already happened earlier in the code.
-                            pending = state["pending_tool"]
-                            tool_name = pending["name"]
-                            merged_args = pending["arguments"]
-                            
-                            # Execute tool
-                            await safe_send(websocket, {"type": "status", "message": "executing_tool", "tool_name": tool_name})
-                            result = await execute_google_tool(websocket.app.state.mcp_client, tool_name, merged_args, user_id)
-                            print(f"[LOGGER] TOOL EXECUTION ({tool_name}): {result}")
-                            await safe_send(websocket, {"type": "tool_result", "tool_name": tool_name, "result": result})
-                            
-                            if result.get("status") == "error" or result.get("error"):
-                                error_msg = result.get("message") or result.get("error") or "Tool execution failed"
-                                await safe_send(websocket, {
-                                    "type": "error", "message": f"Tool '{tool_name}' failed: {error_msg}",
-                                    "tool_name": tool_name, "recoverable": True
-                                })
-                                state["pending_tool"] = None
-                                await state_m.save_message("assistant", f"Error: {error_msg}", workflow_state=state)
-                                await safe_send(websocket, {"type": "workflow_complete", "status": "error", "session_id": session_id})
-                                continue
-                            
-                            state["pending_tool"] = None
-                            
-                            # Append result to history
-                            # Ensure we have the correct formatting for tool output
-                            # Add the tool_call response so the model knows what happened
-                            await state_m.save_message("tool", content=json.dumps(result), tool_name=tool_name, workflow_state=state)
-                            chat_history = await state_m.get_full_history()
-                        
-                        # System prompt
-                        chat_history.insert(0, {"role": "system", "content": "You are a professional assistant. You have access to tools. Always formulate your final answer following the structured FORMAT_SCHEMA. Since the chat supports UI structured rendering, ALWAYS OUTPUT JSON matching the structured_article schema in your final text."})
-                        
-                        while True:
-                            await safe_send(websocket, {"type": "status", "message": "thinking"})
-                            # Execute Native stream
-                            stream = await client_openai.chat.completions.create(
-                                model="gpt-4o",
-                                messages=chat_history[-20:],
-                                tools=openai_tools,
-                                tool_choice="auto",
-                                max_tokens=2048
-                            )
-                            
-                            response_message = stream.choices[0].message
-                            print(f"[LOGGER] AI RESPONSE (workflow_handler main loop): {str(response_message)}")
-                            
-                            # If no tool calls, it's returning the final message
-                            if not response_message.tool_calls:
-                                # Send chunked or full text? Since the UI expects FORMAT_SCHEMA JSON, we just send it.
-                                # Try parsing it just to be safe
-                                final_content = response_message.content
-                                try:
-                                    structured_data = json.loads(final_content)
-                                    await safe_send(websocket, {"type": "content", "chunk": json.dumps(structured_data)})
-                                    await state_m.save_message("assistant", json.dumps(structured_data), workflow_state=state)
-                                except Exception:
-                                    await safe_send(websocket, {"type": "content", "chunk": final_content})
-                                    await state_m.save_message("assistant", final_content, workflow_state=state)
-                                
-                                await safe_send(websocket, {
-                                    "type": "workflow_complete", 
-                                    "status": "success",
-                                    "session_id": session_id,
-                                    "message": "Workflow completed successfully"
-                                })
-                                await safe_send(websocket, {"type": "done", "session_id": session_id})
-                                break
-                            
-                            # Has tool calls
-                            chat_history.append({"role": "assistant", "content": response_message.content or "", "tool_calls": [tc.model_dump() for tc in response_message.tool_calls]})
-                            await state_m.save_message("assistant", content="Calling tools...", workflow_state=state) # placeholder
-                            
-                            # Execute each tool call
-                            needs_hitl = False
-                            for tool_call in response_message.tool_calls:
-                                tool_name = tool_call.function.name
-                                try:
-                                    tool_args = json.loads(tool_call.function.arguments)
-                                except Exception:
-                                    tool_args = {}
-                                
-                                tool_def = next((t for t in TOOLS_REGISTRY if t["tool_id"] == tool_name), None)
-                                
-                                # Check missing
-                                missing = []
-                                if tool_def:
-                                    for req in tool_def.get("must_required_params", []):
-                                        if req not in tool_args or tool_args[req] is None or str(tool_args[req]).strip() == "":
-                                            missing.append(req)
-                                
-                                if missing:
-                                    state["pending_tool"] = {"name": tool_name, "arguments": tool_args, "hitl_type": "form", "tool_call_id": tool_call.id}
-                                    schema = get_hitl_form_schema(tool_name, missing)
-                                    await safe_send(websocket, {"type": "hitl_form", "schema": schema})
-                                    await state_m.save_message("assistant", f"Need parameters for {tool_name}", hitl_type="form", hitl_schema=schema, workflow_state=state)
-                                    needs_hitl = True
-                                    break
-                                
-                                # Execute
-                                await safe_send(websocket, {"type": "status", "message": "executing_tool", "tool_name": tool_name})
-                                result = await execute_google_tool(websocket.app.state.mcp_client, tool_name, tool_args, user_id)
-                                await safe_send(websocket, {"type": "tool_result", "tool_name": tool_name, "result": result})
-                                
-                                # Append to history for next loop
-                                chat_history.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "name": tool_name,
-                                    "content": json.dumps(result)
-                                })
-                                await state_m.save_message("tool", content=json.dumps(result), tool_name=tool_name, workflow_state=state)
-                            
-                            if needs_hitl:
-                                break
-                    except Exception as e:
-                        print(f"[ERROR] Native tool execution failed: {e}")
-                        traceback.print_exc()
-                        await safe_send(websocket, {
-                            "type": "error", "message": f"Execution error: {str(e)}", "recoverable": True
-                        })
-                        await safe_send(websocket, {"type": "workflow_complete", "status": "error", "session_id": session_id})
+                    state["user_goal"] = user_message
                     
-                    # Stop further processing in normal loop since it's a second request
-                    continue
-
-                # --- INITIAL PLANNER CALL FOR FIRST REQUEST ---
-                if user_message and not state.get("plan"):
-                    try:
-                        await safe_send(websocket, {"type": "status", "message": "thinking"})
-                        extracted = await extract_variables(client_openai, user_message)
-                        print(f"[LOGGER] EXTRACTED VARIABLES ({session_id}): {json.dumps(extracted, indent=2)}")
-                    except Exception as extract_error:
-                        print(f"[ERROR] Variable extraction failed: {extract_error}")
-                        await websocket.send_text(json.dumps({
-                            "type": "error",
-                            "message": f"Failed to analyze your request: {str(extract_error)}",
-                            "stage": "variable_extraction",
-                            "recoverable": True
-                        }))
-                        await websocket.send_text(json.dumps({"type": "workflow_complete", "status": "error", "session_id": session_id}))
-                        continue
+                    state["plan"] = None
+                    state["pending_tool"] = None
+                    state["current_step"] = 0
+                    state["execution_context"] = {}
                     
-                    try:
-                        await safe_send(websocket, {"type": "status", "message": "choosing_tools"})
-                        plan = await plan_workflow(client_openai, user_message, TOOLS_REGISTRY, extracted)
-                        
-                        print(f"[LOGGER] OPENAI PLANNER ({session_id}): {json.dumps(plan, indent=2)}")
-                        
-                        # Check if plan is empty or invalid
-                        if not plan or len(plan) == 0:
-                            await websocket.send_text(json.dumps({
-                                "type": "error",
-                                "message": "I couldn't determine which tools to use. Please try rephrasing your request.",
-                                "stage": "planning",
-                                "recoverable": True
-                            }))
-                            await websocket.send_text(json.dumps({"type": "workflow_complete", "status": "error", "session_id": session_id}))
-                            continue
-                        
-                        # Send plan preview to user
-                        await safe_send(websocket, {
-                            "type": "plan_preview",
-                            "plan": plan,
-                            "extracted_variables": extracted
-                        })
-                        
-                        state["plan"] = plan
-                        state["current_step"] = 0
-                        state["execution_context"] = extracted.copy()  # Initialize with extracted vars
-                    except Exception as plan_error:
-                        print(f"[ERROR] Planning failed: {plan_error}")
-                        await websocket.send_text(json.dumps({
-                            "type": "error",
-                            "message": f"Failed to create execution plan: {str(plan_error)}",
-                            "stage": "planning",
-                            "extracted_variables": extracted if 'extracted' in dir() else {},
-                            "recoverable": True
-                        }))
-                        await websocket.send_text(json.dumps({"type": "workflow_complete", "status": "error", "session_id": session_id}))
-                        continue
-                
-                # --- EXECUTE PLAN ---
+                    await safe_send(websocket, {"type": "status", "message": "planning"})
+                    # Planning uses tool registry as reference (Step 1)
+                    history = await state_m.get_full_history()
+                    plan_data = await plan_workflow(client_openai, user_message, history, current_time_ist)
+                    print(f"[LOGGER] PLAN GENERATED: {json.dumps(plan_data, indent=2)}")
+                    
+                    state["plan"] = plan_data.get("plan", [])
+                    await state_m.save(state)
+                    await safe_send(websocket, {"type": "plan_preview", "plan": state["plan"]})
+
+                # --- STEP 4: PARAMETER EXTRACTION FROM HITL ---
+                if hitl_response and state.get("pending_tool"):
+                    pending = state["pending_tool"]
+                    tool_id = pending["name"]
+                    user_input_text = json.dumps(hitl_response)
+                    
+                    await safe_send(websocket, {"type": "status", "message": "extracting_params"})
+                    # Extract params using LLM (Step 4)
+                    extracted = await extract_params_from_hitl(client_openai, tool_id, user_input_text)
+                    print(f"[LOGGER] EXTRACTED FROM HITL: {json.dumps(extracted, indent=2)}")
+                    
+                    # Merge into context and clear pending state
+                    state["execution_context"].update(extracted)
+                    state["pending_tool"] = None
+                    await state_m.save_message("user", f"Provided info: {user_input_text}", workflow_state=state)
+
+                # --- STEPS 2-5: SEQUENTIAL EXECUTION LOOP ---
                 while state.get("plan") and state["current_step"] < len(state["plan"]):
                     step = state["plan"][state["current_step"]]
-                    tool_name = step.get("tool_id")
+                    tool_id = step.get("tool_id")
                     
-                    # DYNAMIC PARAMETER RESOLUTION
-                    # Fetch full history to inform the LLM
-                    history = await state_m.get_full_history()
-                    resolution = await resolve_step_parameters(
-                        client_openai, 
-                        tool_name, 
-                        state.get("user_goal", ""), 
-                        history, 
-                        state.get("execution_context", {}), 
-                        step, 
-                        TOOLS_REGISTRY
-                    )
+                    # Resolve variables (Planning vars + collected context)
+                    current_args = step.get("variables", {}).copy()
+                    current_args.update(state["execution_context"])
                     
-                    merged_args = resolution.get("arguments", {})
-                    missing = resolution.get("missing_params", [])
+                    # Step 3: Check for missing required params
+                    tool_def = next((t for t in TOOLS_REGISTRY if t["tool_id"] == tool_id), None)
+                    required = tool_def.get("must_required_params", []) if tool_def else []
+                    missing = [p for p in required if p not in current_args or current_args[p] in (None, "", "null")]
                     
-                    tool_def = next((t for t in TOOLS_REGISTRY if t["tool_id"] == tool_name), None)
-                    if not tool_def: 
-                        state["current_step"] += 1
-                        continue
-                    
-                    # Check for missing required params
                     if missing:
-                        state["pending_tool"] = {"name": tool_name, "arguments": merged_args, "hitl_type": "form"}
-                        schema = get_hitl_form_schema(tool_name, missing)
+                        print(f"[LOGGER] TOOL {tool_id} MISSING PARAMS: {missing}")
+                        state["pending_tool"] = {"name": tool_id, "arguments": current_args, "hitl_type": "form"}
+                        schema = get_hitl_form_schema(tool_id, missing)
                         await safe_send(websocket, {"type": "hitl_form", "schema": schema})
-                        await state_m.save_message("assistant", f"Need parameters for {tool_name}", hitl_type="form", hitl_schema=schema, workflow_state=state)
-                        break 
+                        await state_m.save_message("assistant", f"I need more information to {tool_id.replace('_', ' ')}.", hitl_type="form", hitl_schema=schema, workflow_state=state)
+                        break # Pause loop for user input
                     
-                    # Update context with resolved arguments
-                    state["execution_context"].update(merged_args)
+                    # Step 2: Parameter Resolution (Fixing placeholders & Email improvement)
+                    await safe_send(websocket, {"type": "status", "message": "resolving_params"})
+                    resolved_args = await resolve_parameters(client_openai, tool_id, current_args, state)
+                    
+                    # Step 2: Tool execution (Bypassing MCP, calling local)
+                    await safe_send(websocket, {
+                        "type": "status", 
+                        "message": "executing_tool", 
+                        "tool_name": tool_id,
+                        "arguments": resolved_args
+                    })
+                    
+                    # Broadcast the tool call details to the UI
+                    await safe_send(websocket, {
+                        "type": "tool_call",
+                        "tool_name": tool_id,
+                        "arguments": resolved_args,
+                        "step": state["current_step"] + 1
+                    })
 
-                    # Check for HITL confirmation (sensitive actions)
-                    if tool_name in ["send_email", "schedule_calendar_event", "delete_calendar_event", "delete_drive_file", "delete_email"]:
-                        state["pending_tool"] = {"name": tool_name, "arguments": merged_args, "hitl_type": "confirmation"}
-                        await safe_send(websocket, {
-                            "type": "hitl_confirmation", 
-                            "title": "Confirm Action", 
-                            "message": f"Proceed with {tool_name.replace('_', ' ').title()}?", 
-                            "details": merged_args
-                        })
-                        await state_m.save_message("assistant", f"Confirmation needed for {tool_name}", hitl_type="confirmation", workflow_state=state)
-                        break
-
-                    # Execute tool
-                    # SEPARATION OF CONCERNS: Send status as distinct event
-                    await safe_send(websocket, {"type": "status", "message": "executing_tool", "tool_name": tool_name})
-                    result = await execute_google_tool(websocket.app.state.mcp_client, tool_name, merged_args, user_id)
-                    print(f"[LOGGER] TOOL EXECUTION ({tool_name}): {result}")
+                    result = await execute_google_tool(tool_id, resolved_args, user_id)
+                    print(f"[LOGGER] TOOL RESULT ({tool_id}): {result}")
                     
-                    # SPECIAL CASE: list_drive_files handles doc discovery
-                    if tool_name == "list_drive_files":
-                        files = result.get("files", [])
-                        search_query = merged_args.get("filename") or merged_args.get("query") or ""
-                        
-                        # We ALWAYS run similarity search if we found 1 or more files
-                        # to ensure consistent HITL experience or confident auto-picking.
-                        if len(files) >= 1 :
-                            print(f"[LOGGER] Drive results count: {len(files)} for query '{search_query}'. Running similarity search...")
-                            
-                            similarity_results = await find_similar_files(client_openai, search_query, files, user_goal=state.get("user_goal", ""))
-                            best_match_id = similarity_results.get("best_match_id")
-                            matches = similarity_results.get("matches", [])
-                            
-                            if best_match_id:
-                                # Auto-pick the best match
-                                best_match = next((m for m in matches if m["id"] == best_match_id), None)
-                                print(f"[LOGGER] LLM auto-picked best match: {best_match.get('name') if best_match else best_match_id}")
-                                
-                                # Update result to simulate a single successful find
-                                if best_match:
-                                    result["files"] = [best_match]
-                                    selected_name = best_match.get("name", "selected file")
-                                else:
-                                    selected_name = "selected file"
-                                
-                                # SEPARATE MESSAGE for selection notification
-                                await safe_send(websocket, {
-                                    "role": "assistant", 
-                                    "content": f"Found and selected: {selected_name}",
-                                    "type": "content"
-                                })
-                                await safe_send(websocket, {"type": "tool_result", "tool_name": tool_name, "result": result})
-                            elif matches:
-                                # Decision needed
-                                state["pending_tool"] = {"name": tool_name, "arguments": merged_args, "hitl_type": "selection"}
-                                options = []
-                                is_sheet = any("spreadsheet" in m.get("mimeType", "").lower() for m in matches)
-                                
-                                for m in matches:
-                                    label = f"[{m.get('relevance_label', 'Match')}]"
-                                    options.append({
-                                        "id": m["id"], 
-                                        "name": f"{label} {m['name']}", 
-                                        "description": m["reason"]
-                                    })
-                                
-                                title = "Spreadsheet Selection" if is_sheet else "File Selection"
-                                msg = f"I found several { 'spreadsheets' if is_sheet else 'files' } matching '{search_query}'. Which one should I use?"
-                                
-                                schema = get_hitl_selection_schema(title=title, message=msg, options=options)
-                                await safe_send(websocket, {"type": "hitl_selection", "schema": schema})
-                                await state_m.save_message("assistant", f"Selection needed for {search_query}", hitl_type="selection", hitl_schema=schema, workflow_state=state)
-                                break 
-                            else:
-                                # No good matches found by LLM filter
-                                await safe_send(websocket, {"type": "tool_result", "tool_name": tool_name, "result": result})
-                        else:
-                            # 0 files found or error
-                            await safe_send(websocket, {"type": "tool_result", "tool_name": tool_name, "result": result})
-                    else:
-                        await safe_send(websocket, {"type": "tool_result", "tool_name": tool_name, "result": result})
+                    # Broadcast the tool result to the UI
+                    await safe_send(websocket, {
+                        "type": "tool_result", 
+                        "tool_name": tool_id, 
+                        "result": result,
+                        "step": state["current_step"] + 1
+                    })
                     
-                    # CHECK FOR TOOL ERROR - break stream immediately
-                    if result.get("status") == "error" or result.get("error"):
-                        error_msg = result.get("message") or result.get("error") or "Tool execution failed"
-                        print(f"[TOOL ERROR] {tool_name}: {error_msg}")
-                        await safe_send(websocket, {
-                            "type": "error", 
-                            "message": f"Tool '{tool_name}' failed: {error_msg}",
-                            "tool_name": tool_name,
-                            "recoverable": True
-                        })
-                        # Clear state and stop workflow
-                        state["plan"] = None
-                        state["execution_context"] = {}
-                        await state_m.save_message("assistant", f"Error: {error_msg}", workflow_state=state)
-                        await safe_send(websocket, {"type": "workflow_complete", "status": "error", "session_id": session_id})
-                        break
+                    # Update context for next steps
+                    await state_m.save_message("tool", content=json.dumps(result), tool_name=tool_id, workflow_state=state)
                     
-                    # LLM Verification for each step
-                    remaining_plan = state["plan"][state["current_step"] + 1:]
-                    verification = await verify_step_result(
-                        client_openai, 
-                        tool_name, 
-                        merged_args, 
-                        result,
-                        state.get("user_goal", ""),
-                        remaining_plan,
-                        state.get("execution_context", {})
-                    )
-                    print(f"[LOGGER] VERIFICATION ({tool_name}): {verification}")
+                    # Store step result explicitly for placeholder resolution
+                    step_key = f"step_{state['current_step'] + 1}_result"
+                    state["execution_context"][step_key] = result
                     
-                    # Update execution context
-                    if verification.get("context_for_next_step"):
-                        state["execution_context"].update(verification["context_for_next_step"])
-                    if verification.get("updated_variables"):
-                        for future_step in state["plan"][state["current_step"] + 1:]:
-                            future_step["variables"].update(verification["updated_variables"])
+                    if isinstance(result, dict) and result.get("status") == "success":
+                         state["execution_context"].update(result)
                     
-                    # SPECIAL CASE: If tool result indicates a PDF was read, trigger the UI viewer
-                    if tool_name == "read_drive_file_content" and result.get("is_pdf"):
-                        file_id = result.get("file_id")
-                        # Send view_pdf event
-                        await safe_send(websocket, {
-                            "type": "view_pdf",
-                            "file_id": file_id,
-                            "file_name": result.get("name"),
-                            "proxy_url": f"/api/drive/view/{file_id}"
-                        })
-
                     state["current_step"] += 1
-                    await state_m.save_message("tool", content=json.dumps(result), tool_name=tool_name, workflow_state=state)
-                    
-                    # Check if verification says to stop
-                    if not verification.get("should_continue", True):
-                        await safe_send(websocket, {"role": "assistant", "content": verification.get("error_recovery", "Workflow stopped."), "type": "content"})
-                        await safe_send(websocket, {"type": "workflow_complete", "status": "stopped", "session_id": session_id})
-                        await safe_send(websocket, {"type": "done", "session_id": session_id})
-                        break
+                    await state_m.save(state)
 
-                # --- FINAL STRUCTURED RESPONSE ---
-                if (user_message or hitl_response) and state.get("pending_tool") is None:
-                    # Only generate final response if no pending HITL
-                    plan_complete = not state.get("plan") or state["current_step"] >= len(state.get("plan", []))
+                # --- STEP 5: FINAL NATURAL RESPONSE ---
+                plan_complete = state.get("plan") and state["current_step"] >= len(state["plan"])
+                if plan_complete and state.get("pending_tool") is None:
+                    await safe_send(websocket, {"type": "status", "message": "finalizing"})
+                    history = await state_m.get_full_history()
                     
-                    if plan_complete or not state.get("plan"):
-                        try:
-                            history = await state_m.get_full_history()
-                            history.append({"role": "system", "content": "Generate the final response using the specified structured format."})
-                            response = await client_openai.chat.completions.create(
-                                model="gpt-4o",
-                                messages=history[-15:],
-                                response_format=FORMAT_SCHEMA
-                            )
-                            structured_data = json.loads(response.choices[0].message.content)
-                            print(f"[LOGGER] OPENAI ASSISTANT ({session_id}): {json.dumps(structured_data, indent=2)}")
-                            # REMOVED finished: True from content chunk
-                            await safe_send(websocket, {"type": "content", "chunk": json.dumps(structured_data)})
-                            
-                            state["plan"] = None 
-                            state["execution_context"] = {}
-                            await state_m.save_message("assistant", json.dumps(structured_data), workflow_state=state)
-                            
-                            # Send clear completion signal
-                            await safe_send(websocket, {
-                                "type": "workflow_complete", 
-                                "status": "success",
-                                "session_id": session_id,
-                                "message": "Workflow completed successfully"
-                            })
-                            await safe_send(websocket, {"type": "done", "session_id": session_id})
-                        except json.JSONDecodeError as json_err:
-                            print(f"[ERROR] Failed to parse LLM response: {json_err}")
-                            await safe_send(websocket, {
-                                "type": "error",
-                                "message": "Failed to generate final response. Please try again.",
-                                "stage": "response_generation",
-                                "recoverable": True
-                            })
-                            await safe_send(websocket, {"type": "workflow_complete", "status": "error", "session_id": session_id})
-                        except Exception as response_error:
-                            print(f"[ERROR] Final response generation failed: {response_error}")
-                            await safe_send(websocket, {
-                                "type": "error",
-                                "message": f"Error generating response: {str(response_error)}",
-                                "stage": "response_generation",
-                                "recoverable": True
-                            })
-                            await safe_send(websocket, {"type": "workflow_complete", "status": "error", "session_id": session_id})
+                    # Synthesize a natural answer (Step 5)
+                    response = await client_openai.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": "You are a helpful assistant. Provide a natural, concise, and direct response based on the tool execution results. Avoid generic summaries or vague JSON. Just answer the user's initial request clearly."},
+                            *history[-10:]
+                        ]
+                    )
+                    final_text = response.choices[0].message.content
+                    await safe_send(websocket, {"type": "content", "chunk": final_text})
+                    await state_m.save_message("assistant", final_text, workflow_state=state)
+                    
+                    # Reset state for next interaction
+                    state["plan"] = None
+                    state["current_step"] = 0
+                    state["execution_context"] = {}
+                    await state_m.save(state)
+                    await safe_send(websocket, {"type": "done", "session_id": session_id})
+
+            except Exception as e:
+                print(f"[WS ERROR] Processing error: {e}")
+                traceback.print_exc()
+                await safe_send(websocket, {"type": "error", "message": str(e), "recoverable": True})
 
             except Exception as e:
                 error_details = str(e)
@@ -1241,7 +806,6 @@ async def workflow_handler(websocket: WebSocket, client_openai):
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
-        if db: db.close()
 
 async def stream_openai_response_async(client_openai, messages, tools=None):
     kwargs = {"model": "gpt-4o", "messages": messages, "stream": True}

@@ -1,27 +1,77 @@
-import { ChatSession, Message, Citation } from '../types/chat';
+import { ChatSession, Message } from '../types/chat';
 import { authService } from './authService';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
 export async function fetchChatHistory(): Promise<ChatSession[]> {
-  const token = authService.getToken();
-  // const response = await fetch(`${API_BASE_URL}/chat/history`, {
-  //   headers: { Authorization: `Bearer ${token}` }
-  // });
-  var response:any;
-  if (!response) return [];
-  const data = await response.json();
-  return data.sessions || [];
+  try {
+    const token = authService.getToken();
+    const response = await fetch(`${API_BASE_URL}/threads`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!response.ok) return [];
+    const data = await response.json();
+    return (data.threads || []).map((t: any) => ({
+      id: t.id,
+      title: t.title || t.name,
+      updatedAt: new Date(t.updated_at * 1000).toISOString(),
+    }));
+  } catch {
+    return [];
+  }
 }
 
-export async function fetchSessionMessages(sessionId: string): Promise<Message[]> {
-  const token = authService.getToken();
-  const response = await fetch(`${API_BASE_URL}/chat/history/${sessionId}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  if (!response.ok) return [];
-  const data = await response.json();
-  return data.messages || [];
+export async function createThread(): Promise<ChatSession | null> {
+  try {
+    const token = authService.getToken();
+    const response = await fetch(`${API_BASE_URL}/threads`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const t = data.thread;
+    return {
+      id: t.id,
+      title: t.name,
+      updatedAt: new Date(t.created_at * 1000).toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchSessionMessages(threadId: string): Promise<Message[]> {
+  try {
+    const token = authService.getToken();
+    const response = await fetch(`${API_BASE_URL}/threads/${threadId}/messages`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!response.ok) return [];
+    const data = await response.json();
+    return (data.messages || []).map((m: any) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      createdAt: new Date(m.createdAt * 1000).toISOString(),
+      toolName: m.toolName,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteThread(threadId: string): Promise<boolean> {
+  try {
+    const token = authService.getToken();
+    const response = await fetch(`${API_BASE_URL}/threads/${threadId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 export async function sendMessageStream(
@@ -29,8 +79,8 @@ export async function sendMessageStream(
   file: File | undefined,
   sessionId: string | undefined,
   onChunk: (chunk: string) => void,
-  onCitations: (citations: Citation[]) => void,
-  onToolType: (toolType: string) => void, // ✅ NEW
+  onCitations: (citations: any[]) => void,
+  onToolType: (toolType: string) => void,
   onDone: (sessionId: string) => void,
   onError: (error: any) => void
 ) {
@@ -71,27 +121,22 @@ export async function sendMessageStream(
 
           switch (payload.type) {
             case 'ai-response':
-              onToolType(payload.type); // 👈 update tool label
+              onToolType(payload.type);
               onChunk(payload.chunk);
               break;
-
             case 'sources':
               onToolType(payload.type);
               onCitations(payload.citations);
               break;
-
             case 'done':
               onToolType(payload.type);
               onDone(payload.session_id);
               break;
-
             case 'error':
               onToolType(payload.type);
               onError(new Error(payload.message));
               break;
-
             default:
-              // ✅ ANY OTHER TYPE = TOOL INDICATOR
               onToolType(payload.type);
               break;
           }

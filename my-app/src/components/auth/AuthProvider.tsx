@@ -1,7 +1,7 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { User, AuthResponse } from '../../lib/types/auth';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { User, AuthResponse, GoogleStatus } from '../../lib/types/auth';
 import { authService } from '../../lib/api/authService';
 
 interface AuthContextType {
@@ -11,23 +11,49 @@ interface AuthContextType {
   signup: (username: string, password?: string, confirmPassword?: string) => Promise<AuthResponse>;
   logout: () => void;
   isAuthenticated: boolean;
+  googleStatus: GoogleStatus | null;
+  refreshGoogleStatus: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(false); // Used for initial load check if needed, or login process
+  const [isLoading, setIsLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [googleStatus, setGoogleStatus] = useState<GoogleStatus | null>(null);
+
+  const hydrateFromMe = useCallback(async () => {
+    const meData = await authService.fetchMe();
+    if (meData.user) {
+      setUser({
+        id: String(meData.user.id),
+        username: meData.user.username,
+        name: meData.user.username,
+      });
+      setIsAuthenticated(true);
+      setGoogleStatus(meData.google || { connected: false });
+    } else {
+      authService.logout();
+      setUser(null);
+      setIsAuthenticated(false);
+      setGoogleStatus(null);
+    }
+  }, []);
 
   useEffect(() => {
-    // Check for existing token on mount
     const token = authService.getToken();
     if (token) {
-      setIsAuthenticated(true);
-      // In a real app, you might fetch the user profile here using the token
-      // For now, we just restore a dummy user state if a token exists
-      setUser({ id: '1', username: 'User', name: 'Returning User' }); 
+      hydrateFromMe().finally(() => setIsLoading(false));
+    } else {
+      setIsLoading(false);
+    }
+  }, [hydrateFromMe]);
+
+  const refreshGoogleStatus = useCallback(async () => {
+    const meData = await authService.fetchMe();
+    if (meData.google) {
+      setGoogleStatus(meData.google);
     }
   }, []);
 
@@ -35,9 +61,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     try {
       const response = await authService.login({ username, password });
-      if (response.success && response.user) {
-        setUser(response.user);
-        setIsAuthenticated(true);
+      if (response.success) {
+        await hydrateFromMe();
       }
       return response;
     } catch (error) {
@@ -51,9 +76,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     try {
       const response = await authService.signup({ username, password, confirmPassword });
-      if (response.success && response.user) {
-        setUser(response.user);
-        setIsAuthenticated(true);
+      if (response.success) {
+        await hydrateFromMe();
       }
       return response;
     } catch (error) {
@@ -67,10 +91,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     authService.logout();
     setUser(null);
     setIsAuthenticated(false);
+    setGoogleStatus(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, signup, logout, isAuthenticated }}>
+    <AuthContext.Provider value={{ user, isLoading, login, signup, logout, isAuthenticated, googleStatus, refreshGoogleStatus }}>
       {children}
     </AuthContext.Provider>
   );

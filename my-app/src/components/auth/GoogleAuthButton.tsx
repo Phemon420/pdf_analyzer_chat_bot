@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { authService } from '../../lib/api/authService';
+import { useAuthContext } from './AuthProvider';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || '';
 
@@ -10,53 +11,10 @@ interface GoogleAuthButtonProps {
 }
 
 export function GoogleAuthButton({ className = '' }: GoogleAuthButtonProps) {
-    const [isConnected, setIsConnected] = useState(false);
-    const [isLoading, setIsLoading] = useState(true);
+    const { googleStatus, refreshGoogleStatus, isLoading: authLoading } = useAuthContext();
     const [isConnecting, setIsConnecting] = useState(false);
 
-    // Check connection status on mount
-    useEffect(() => {
-        checkConnectionStatus();
-    }, []);
-
-    // Listen for OAuth callback messages from popup
-    useEffect(() => {
-        const handleMessage = (event: MessageEvent) => {
-            if (event.data.type === 'GOOGLE_OAUTH_SUCCESS') {
-                setIsConnected(true);
-                setIsConnecting(false);
-            } else if (event.data.type === 'GOOGLE_OAUTH_ERROR') {
-                console.error('OAuth error:', event.data.error);
-                setIsConnecting(false);
-            }
-        };
-
-        window.addEventListener('message', handleMessage);
-        return () => window.removeEventListener('message', handleMessage);
-    }, []);
-
-    const checkConnectionStatus = async () => {
-        try {
-            const token = authService.getToken();
-            if (!token) {
-                setIsLoading(false);
-                return;
-            }
-
-            const response = await fetch(`${API_BASE_URL}/oauth/google/status`, {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                },
-            });
-
-            const data = await response.json();
-            setIsConnected(data.connected || false);
-        } catch (error) {
-            console.error('Error checking Google connection:', error);
-        } finally {
-            setIsLoading(false);
-        }
-    };
+    const isConnected = googleStatus?.connected ?? false;
 
     const handleConnect = async () => {
         try {
@@ -69,7 +27,6 @@ export function GoogleAuthButton({ className = '' }: GoogleAuthButtonProps) {
                 return;
             }
 
-            // Get OAuth URL from backend
             const response = await fetch(`${API_BASE_URL}/oauth/google/url`, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -82,7 +39,6 @@ export function GoogleAuthButton({ className = '' }: GoogleAuthButtonProps) {
                 throw new Error(data.message || 'Failed to get OAuth URL');
             }
 
-            // Open OAuth popup
             const width = 500;
             const height = 600;
             const left = window.screenX + (window.outerWidth - width) / 2;
@@ -94,13 +50,11 @@ export function GoogleAuthButton({ className = '' }: GoogleAuthButtonProps) {
                 `width=${width},height=${height},left=${left},top=${top}`
             );
 
-            // Poll for popup closure
             const checkPopup = setInterval(() => {
                 if (popup?.closed) {
                     clearInterval(checkPopup);
-                    // Re-check connection status after popup closes
-                    setTimeout(() => {
-                        checkConnectionStatus();
+                    setTimeout(async () => {
+                        await refreshGoogleStatus();
                         setIsConnecting(false);
                     }, 1000);
                 }
@@ -130,14 +84,14 @@ export function GoogleAuthButton({ className = '' }: GoogleAuthButtonProps) {
             const data = await response.json();
 
             if (data.status === 1) {
-                setIsConnected(false);
+                await refreshGoogleStatus();
             }
         } catch (error) {
             console.error('Error disconnecting Google:', error);
         }
     };
 
-    if (isLoading) {
+    if (authLoading) {
         return (
             <button
                 disabled

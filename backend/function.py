@@ -50,6 +50,8 @@ def function_add_router(app, router_folder_path):
 
 import jwt,json,time
 async def function_token_encode(config_key_jwt,config_token_expire_sec,object,user_key_list):
+    if not object:
+        return None
     data=dict(object)
     payload={k:data.get(k) for k in user_key_list}
     payload=json.dumps(payload,default=str)
