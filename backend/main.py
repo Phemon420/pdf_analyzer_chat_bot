@@ -4,7 +4,16 @@ from function import *
 # Load environment variables from .env file
 load_dotenv()
 
-config_cors_origin_list=["*"]
+# CORS Configuration - Explicitly allow local and production origins
+frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+config_cors_origin_list = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://pdf-analyzer-chat-bot.vercel.app",
+    frontend_url
+]
+# Remove duplicates and filter empty/invalid strings
+config_cors_origin_list = list(set(filter(None, config_cors_origin_list)))
 config_postgres_url=os.environ.get("DATABASE_URL")
 config_token_user_key_list = "id,username".split(",")
 config_key_root = os.environ.get("config_key_root")

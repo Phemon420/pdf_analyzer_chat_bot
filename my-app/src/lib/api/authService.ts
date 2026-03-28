@@ -54,7 +54,7 @@ export const authService = {
     }
   },
 
-  async fetchMe(): Promise<{ user: { id: string; username: string } | null; google: GoogleStatus | null }> {
+  async fetchMe(): Promise<{ user: { id: string; username: string } | null; google: GoogleStatus | null; error?: string }> {
     const token = this.getToken();
     if (!token) return { user: null, google: null };
 
@@ -62,6 +62,10 @@ export const authService = {
       const response = await fetch(`${API_BASE_URL}/auth/me`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
+
+      if (response.status === 401) {
+        return { user: null, google: null, error: 'UNAUTHORIZED' };
+      }
 
       const data = await response.json();
 
@@ -72,10 +76,10 @@ export const authService = {
         };
       }
 
-      return { user: null, google: null };
+      return { user: null, google: null, error: 'SERVER_ERROR' };
     } catch (error) {
       console.error('fetchMe failed:', error);
-      return { user: null, google: null };
+      return { user: null, google: null, error: 'NETWORK_ERROR' };
     }
   },
 

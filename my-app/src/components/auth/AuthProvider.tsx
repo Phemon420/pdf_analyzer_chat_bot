@@ -33,11 +33,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
       setIsAuthenticated(true);
       setGoogleStatus(meData.google || { connected: false });
-    } else {
+    } else if (meData.error === 'UNAUTHORIZED') {
       authService.logout();
       setUser(null);
       setIsAuthenticated(false);
       setGoogleStatus(null);
+    } else {
+      // For network/server errors, keep existing state but set loading to false
+      // so the app can still try to function or show a non-auth error.
+      console.warn('Could not refresh session due to error:', meData.error);
     }
   }, []);
 
