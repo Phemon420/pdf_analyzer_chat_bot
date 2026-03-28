@@ -1,38 +1,28 @@
 'use client';
-
-import { useEffect } from 'react';
+import { Suspense, useEffect } from 'react';
 import { useSearchParams } from 'next/navigation';
-
-export default function OAuthCallbackPage() {
+function OAuthCallbackContent() {
     const searchParams = useSearchParams();
-
     useEffect(() => {
         const success = searchParams.get('success');
         const error = searchParams.get('error');
-
         if (window.opener) {
-            // Send message to parent window
             if (success) {
                 window.opener.postMessage({ type: 'GOOGLE_OAUTH_SUCCESS' }, '*');
             } else if (error) {
                 window.opener.postMessage({ type: 'GOOGLE_OAUTH_ERROR', error }, '*');
             }
-
-            // Close the popup after a short delay
             setTimeout(() => {
                 window.close();
             }, 1000);
         } else {
-            // If not in popup, redirect to chat page
             setTimeout(() => {
                 window.location.href = '/chat';
             }, 2000);
         }
     }, [searchParams]);
-
     const success = searchParams.get('success');
     const error = searchParams.get('error');
-
     return (
         <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
             <div className="text-center p-8">
@@ -69,5 +59,21 @@ export default function OAuthCallbackPage() {
                 )}
             </div>
         </div>
+    );
+}
+export default function OAuthCallbackPage() {
+    return (
+        <Suspense fallback={
+            <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+                <div className="text-center p-8">
+                    <div className="text-6xl mb-4 animate-spin">⟳</div>
+                    <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+                        Processing...
+                    </h1>
+                </div>
+            </div>
+        }>
+            <OAuthCallbackContent />
+        </Suspense>
     );
 }
